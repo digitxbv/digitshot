@@ -83,6 +83,15 @@ fn save_png(app: AppHandle, path: String, base64_png: String) -> Result<(), Stri
     Ok(())
 }
 
+/// Raw PNG bytes for the editor. The webview must NOT load editable images via
+/// the asset protocol: WKWebView taints canvases for custom-scheme images
+/// (WebKit bug 201180), breaking toDataURL/getImageData.
+#[tauri::command]
+fn read_image(path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 fn reveal_in_finder(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -168,6 +177,7 @@ pub fn run() {
             copy_image,
             copy_image_data,
             save_png,
+            read_image,
             reveal_in_finder,
             open_editor,
             resize_overlay,

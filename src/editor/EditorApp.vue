@@ -21,6 +21,7 @@
       <button :disabled="!state.snapshot" @click="saveResult">Save</button>
       <button :disabled="!state.snapshot" @click="saveAsResult">Save As…</button>
       <span v-if="flashMsg" class="flash" :style="{ color: flashMsg.startsWith('Failed') ? '#ff453a' : '#30d158' }">{{ flashMsg }}</span>
+      <span v-else-if="toolHint" class="hint">{{ toolHint }}</span>
     </div>
     <div ref="viewport" class="viewport">
       <div v-if="state.error" class="error">
@@ -130,7 +131,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -211,6 +212,15 @@ const selectedBlur = computed<BlurShape | null>(() => {
   return shape?.kind === "blur" ? shape : null;
 });
 
+const toolHint = computed(() => {
+  switch (state.tool) {
+    case "rect": return "Drag on the image to draw a rectangle";
+    case "blur": return "Drag over the area you want to pixelate";
+    case "crop": return "Drag to select the area to keep";
+    default: return "";
+  }
+});
+
 const stageConfig = computed(() => {
   const snap = state.snapshot;
   if (!snap) return { width: 0, height: 0, scaleX: 1, scaleY: 1 };
@@ -288,14 +298,30 @@ function fitToViewport() {
   scale.value = fitScale(snap.baseWidth, snap.baseHeight, maxW, maxH);
 }
 
+// Object URL for the current file's bitmap. WKWebView taints canvases for
+// asset-protocol images (WebKit bug 201180), so the editor loads raw bytes
+// over IPC and uses a same-origin blob URL instead. The URL must stay valid
+// for the whole edit session — undo snapshots reference it — so it is only
+// revoked when a different file is loaded.
+let baseObjectUrl = "";
+
 async function loadFile(path: string) {
   state.filePath = path;
   state.error = "";
-  const assetUrl = convertFileSrc(path);
+  let blobUrl: string;
+  try {
+    const bytes = await invoke<ArrayBuffer>("read_image", { path });
+    blobUrl = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+  } catch {
+    state.error = "Could not load capture — the file may have been moved or deleted.";
+    return;
+  }
+  if (baseObjectUrl) URL.revokeObjectURL(baseObjectUrl);
+  baseObjectUrl = blobUrl;
   const img = new Image();
   img.onload = () => {
     state.snapshot = {
-      baseSrc: assetUrl,
+      baseSrc: blobUrl,
       baseWidth: img.naturalWidth,
       baseHeight: img.naturalHeight,
       shapes: [],
@@ -309,7 +335,7 @@ async function loadFile(path: string) {
   img.onerror = () => {
     state.error = "Could not load capture — the file may have been moved or deleted.";
   };
-  img.src = assetUrl;
+  img.src = blobUrl;
 }
 
 // Watcher for baseSrc changes (Task 9 — undo/redo with different base images)
@@ -445,8 +471,8 @@ function onMouseUp(_e: any) {
       strokeWidth: state.strokeWidth,
     });
     commit();
-    state.tool = "select";
-    state.selectedId = id;
+    // Stay in rect mode so several rectangles can be drawn in a row;
+    // switch to Select to move/resize them.
     resetDraft();
     return;
   }
@@ -469,7 +495,7 @@ function onMouseUp(_e: any) {
       pixelSize: Math.max(8, Math.round(Math.min(clamped.width, clamped.height) / 12)),
     });
     commit();
-    state.tool = "select";
+    // Stay in blur mode, same as rect.
     resetDraft();
     return;
   }
@@ -504,13 +530,17 @@ function cancelCrop() {
 
 async function applyCrop() {
   if (!pendingCrop.value) return;
-  const region = pendingCrop.value;
-  const canvas = await exportFlatten();
-  const out = cropCanvas(canvas, region);
-  pendingCrop.value = null;
-  resetDraft();
-  state.tool = "select";
-  replaceBase(out);
+  try {
+    const region = pendingCrop.value;
+    const canvas = await exportFlatten();
+    const out = cropCanvas(canvas, region);
+    pendingCrop.value = null;
+    resetDraft();
+    state.tool = "select";
+    replaceBase(out);
+  } catch (e) {
+    flash("Failed: " + String(e));
+  }
 }
 
 function replaceBase(canvas: HTMLCanvasElement) {
@@ -562,9 +592,13 @@ async function applyResize() {
     return;
   }
   resizeError.value = "";
-  const canvas = await exportFlatten();
-  showResize.value = false;
-  replaceBase(scaleCanvas(canvas, w, h));
+  try {
+    const canvas = await exportFlatten();
+    showResize.value = false;
+    replaceBase(scaleCanvas(canvas, w, h));
+  } catch (e) {
+    flash("Failed: " + String(e));
+  }
 }
 
 function closeWindow() {
@@ -729,6 +763,10 @@ defineExpose({ pointerInImage, commit, state, scale });
 }
 .flash {
   font-size: 12px;
+}
+.hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
 }
 .viewport {
   flex: 1;
