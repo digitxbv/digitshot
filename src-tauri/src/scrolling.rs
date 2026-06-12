@@ -9,9 +9,9 @@ use std::thread::JoinHandle;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::stitch::{StitchConfig, Stitcher};
+use crate::stitch::{PushResult, StitchConfig, Stitcher};
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Region {
     pub x: u32,
     pub y: u32,
@@ -25,6 +25,11 @@ struct ProgressPayload {
     height: u32,
 }
 
+#[derive(Clone, Serialize)]
+struct StatusPayload {
+    too_fast: bool,
+}
+
 pub struct Session {
     stop: Arc<AtomicBool>,
     handle: JoinHandle<Stitcher>,
@@ -33,7 +38,7 @@ pub struct Session {
 #[derive(Default)]
 pub struct ScrollState(pub Mutex<Option<Session>>);
 
-const FRAME_INTERVAL_MS: u64 = 350;
+const FRAME_INTERVAL_MS: u64 = 140;
 
 pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
     // Verify the primary monitor is reachable before spawning the thread.
@@ -48,6 +53,8 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
     let handle = std::thread::spawn(move || {
         let mut stitcher = Stitcher::new(StitchConfig::default());
         let mut frames: u32 = 0;
+        let mut lowconf_run: u32 = 0;
+        let mut warned = false;
         while !stop_t.load(Ordering::Relaxed) {
             // Sleep BEFORE the first frame: the selector veil has just been
             // shrunk into the control panel and the window move must settle,
@@ -70,7 +77,24 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
             };
             match monitor.capture_region(region.x, region.y, region.width, region.height) {
                 Ok(frame) => {
-                    stitcher.push_frame(&frame);
+                    let result = stitcher.push_frame(&frame);
+                    match result {
+                        PushResult::SkippedLowConfidence => {
+                            lowconf_run += 1;
+                            if lowconf_run >= 2 && !warned {
+                                warned = true;
+                                let _ = app.emit("scroll-status", StatusPayload { too_fast: true });
+                            }
+                        }
+                        PushResult::AppendedRows(_) | PushResult::HardAppended => {
+                            lowconf_run = 0;
+                            if warned {
+                                warned = false;
+                                let _ = app.emit("scroll-status", StatusPayload { too_fast: false });
+                            }
+                        }
+                        _ => {}
+                    }
                     frames += 1;
                     let _ = app.emit(
                         "scroll-progress",

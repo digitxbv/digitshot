@@ -62,7 +62,7 @@ impl Default for StitchConfig {
             template_ratio: 0.2,
             min_confidence: 0.5,
             inertia_px: 500,
-            max_lowconf_streak: 3,
+            max_lowconf_streak: 8,
         }
     }
 }
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn lowconf_streak_hard_appends() {
         let src = make_source(300, 600, 19);
-        let mut s = Stitcher::new(StitchConfig::default());
+        let mut s = Stitcher::new(StitchConfig { max_lowconf_streak: 3, ..StitchConfig::default() });
         s.push_frame(&viewport(&src, 0, 300));
         let flat = RgbaImage::from_pixel(300, 300, Rgba([250, 250, 250, 255]));
         assert!(matches!(s.push_frame(&flat), PushResult::SkippedLowConfidence));

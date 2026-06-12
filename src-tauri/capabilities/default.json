@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "DigitShot windows",
-  "windows": ["overlay", "editor", "selector"],
+  "windows": ["overlay", "editor", "selector", "frame"],
   "permissions": [
     "core:default",
     "core:window:allow-close",

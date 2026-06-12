@@ -30,6 +30,13 @@ tauri_nspanel::tauri_panel! {
             is_floating_panel: true
         }
     })
+    panel!(FramePanel {
+        config: {
+            can_become_key_window: false,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
 }
 
 #[derive(Clone, Serialize)]
@@ -184,6 +191,44 @@ fn filter_existing(paths: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Cover the primary monitor with the click-through frame window, tell its
+/// page where the region is, and show it without focus.
+fn show_frame(app: &AppHandle, region: &scrolling::Region) {
+    if let Some(win) = app.get_webview_window("frame") {
+        if let Ok(Some(monitor)) = win.primary_monitor() {
+            let scale = monitor.scale_factor();
+            let _ = win.set_size(tauri::LogicalSize::new(
+                monitor.size().width as f64 / scale,
+                monitor.size().height as f64 / scale,
+            ));
+            let _ = win.set_position(tauri::LogicalPosition::new(0.0, 0.0));
+        }
+        let _ = win.set_ignore_cursor_events(true); // clicks pass through to the app below
+        let _ = win.emit("scroll-region", region.clone());
+        #[cfg(target_os = "macos")]
+        {
+            use tauri_nspanel::ManagerExt;
+            if let Ok(panel) = app.get_webview_panel("frame") {
+                panel.show();
+            }
+        }
+    }
+}
+
+fn hide_frame(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+        if let Ok(panel) = app.get_webview_panel("frame") {
+            panel.hide();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(w) = app.get_webview_window("frame") {
+        let _ = w.hide();
+    }
+}
+
 /// Entry point for tray/hotkey/selector. Gates on the Screen Recording grant.
 fn begin_scroll_capture(app: &AppHandle) {
     if !permissions::has_screen_recording() {
@@ -249,7 +294,8 @@ fn scroll_capture_start(
     if guard.is_some() {
         return Err("session already running".into());
     }
-    *guard = Some(scrolling::start(app, region)?);
+    *guard = Some(scrolling::start(app.clone(), region)?);
+    show_frame(&app, &region);
     Ok(())
 }
 
@@ -260,6 +306,7 @@ fn scroll_capture_stop(
 ) -> Result<(), String> {
     let session = state.0.lock().unwrap().take().ok_or("no session")?;
     hide_selector(&app);
+    hide_frame(&app);
     if let Some(stitched) = scrolling::stop(session) {
         let dir = capture::captures_dir(&home_dir());
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -282,6 +329,7 @@ fn scroll_capture_cancel(app: AppHandle, state: tauri::State<scrolling::ScrollSt
         scrolling::cancel(session);
     }
     hide_selector(&app);
+    hide_frame(&app);
 }
 
 /// Shrink the selector window into the control panel, placed outside the region.
@@ -431,6 +479,22 @@ pub fn run() {
                 let window = app.get_webview_window("selector").unwrap();
                 let panel = window.to_panel::<SelectorPanel>().unwrap();
                 panel.set_level(PanelLevel::ScreenSaver.value());
+                panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+                panel.set_collection_behavior(
+                    CollectionBehavior::new()
+                        .can_join_all_spaces()
+                        .full_screen_auxiliary()
+                        .value(),
+                );
+                panel.set_hides_on_deactivate(false);
+            }
+
+            // NSPanel frame setup
+            #[cfg(target_os = "macos")]
+            {
+                let window = app.get_webview_window("frame").unwrap();
+                let panel = window.to_panel::<FramePanel>().unwrap();
+                panel.set_level(PanelLevel::Status.value());
                 panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
                 panel.set_collection_behavior(
                     CollectionBehavior::new()
