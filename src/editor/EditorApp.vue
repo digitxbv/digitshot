@@ -24,7 +24,7 @@
       <span v-if="flashMsg" class="flash" :style="{ color: flashMsg.startsWith('Failed') ? '#ff453a' : '#30d158' }">{{ flashMsg }}</span>
       <span v-else-if="toolHint" class="hint">{{ toolHint }}</span>
     </div>
-    <div ref="viewport" class="viewport">
+    <div ref="viewport" class="viewport" :class="{ tall: tallFit }">
       <div v-if="state.error" class="error">
         <p>{{ state.error }}</p>
         <button @click="closeWindow">Close</button>
@@ -158,6 +158,7 @@ const colors = ["#ff3b30", "#0a84ff", "#30d158", "#ffd60a", "#000000"];
 
 const baseImageEl = ref<HTMLImageElement | null>(null);
 const scale = ref(1);
+const tallFit = ref(false);
 const viewport = ref<HTMLDivElement | undefined>(undefined);
 const stageRef = ref<any>();
 const shapesLayerRef = ref<any>();
@@ -298,7 +299,12 @@ function fitToViewport() {
   if (!snap || !viewport.value) return;
   const maxW = viewport.value.clientWidth - 32;
   const maxH = viewport.value.clientHeight - 32;
-  scale.value = fitScale(snap.baseWidth, snap.baseHeight, maxW, maxH);
+  // Stitched scrolling captures are extremely tall: fitting both axes would
+  // render them as a sliver. Fit width only and scroll vertically instead.
+  tallFit.value = snap.baseHeight / snap.baseWidth >= 2;
+  scale.value = tallFit.value
+    ? Math.min(1, maxW / snap.baseWidth)
+    : fitScale(snap.baseWidth, snap.baseHeight, maxW, maxH);
 }
 
 // Object URL for the current file's bitmap. WKWebView taints canvases for
@@ -792,6 +798,10 @@ defineExpose({ pointerInImage, commit, state, scale });
   place-items: center;
   overflow: auto;
   position: relative;
+}
+.viewport.tall {
+  place-items: start center;
+  /* centered overflow clips the top of tall content; start-aligned keeps row 0 reachable */
 }
 .error {
   color: white;
