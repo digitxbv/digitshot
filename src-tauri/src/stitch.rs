@@ -44,6 +44,78 @@ pub(crate) fn vstack(top: &RgbaImage, bottom: &RgbaImage) -> RgbaImage {
     out
 }
 
+#[derive(Clone, Debug)]
+pub struct StitchConfig {
+    /// Template = this fraction of the effective frame height (min 32 px).
+    pub template_ratio: f32,
+    /// NCC score below this -> no trusted match.
+    pub min_confidence: f32,
+    /// Search only within +/- this many rows of the expected position.
+    pub inertia_px: u32,
+    /// After this many consecutive low-confidence frames, hard-append.
+    pub max_lowconf_streak: u32,
+}
+
+impl Default for StitchConfig {
+    fn default() -> Self {
+        Self {
+            template_ratio: 0.2,
+            min_confidence: 0.5,
+            inertia_px: 500,
+            max_lowconf_streak: 3,
+        }
+    }
+}
+
+pub(crate) fn template_height(eff_h: u32, cfg: &StitchConfig) -> u32 {
+    ((eff_h as f32 * cfg.template_ratio) as u32).max(32).min(eff_h.saturating_sub(8))
+}
+
+/// Searches for `prev`'s bottom template strip inside `new` (both edge-domain,
+/// same dimensions). Returns (ty, confidence): ty = row in `new` where the
+/// template's top edge matches. Scroll distance = (h - template_h) - ty.
+/// `expected_ty` (from the previous scroll delta) restricts the search to an
+/// inertia window, defeating repeated-content false matches.
+pub(crate) fn find_overlap(
+    prev: &GrayImage,
+    new: &GrayImage,
+    cfg: &StitchConfig,
+    expected_ty: Option<u32>,
+) -> Option<(u32, f32)> {
+    use imageproc::template_matching::{find_extremes, match_template, MatchTemplateMethod};
+
+    let h = prev.height();
+    let t = template_height(h, cfg);
+    let template = imageops::crop_imm(prev, 0, h - t, prev.width(), t).to_image();
+
+    // Flat template (blank area) -> NCC is meaningless.
+    if !template.pixels().any(|p| p.0[0] >= 8) {
+        return None;
+    }
+
+    // Restrict search rows to the inertia window around the expectation.
+    let (lo, hi) = match expected_ty {
+        Some(exp) => {
+            let lo = exp.saturating_sub(cfg.inertia_px);
+            let hi = (exp + cfg.inertia_px).min(h - t);
+            (lo, hi)
+        }
+        None => (0, h - t),
+    };
+    if lo > hi {
+        return None;
+    }
+    let search = imageops::crop_imm(new, 0, lo, new.width(), hi - lo + t).to_image();
+
+    let result = match_template(&search, &template, MatchTemplateMethod::CrossCorrelationNormalized);
+    let ex = find_extremes(&result);
+    let conf = ex.max_value;
+    if !conf.is_finite() {
+        return None;
+    }
+    Some((lo + ex.max_value_location.1, conf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +173,45 @@ mod tests {
         let textured = make_source(100, 100, 3);
         let et = edges(&textured);
         assert!(et.pixels().any(|p| p.0[0] >= 8));
+    }
+
+    #[test]
+    fn find_overlap_locates_exact_scroll() {
+        let src = make_source(300, 900, 7);
+        let prev = edges(&viewport(&src, 0, 300));
+        let new = edges(&viewport(&src, 120, 300));
+        let cfg = StitchConfig::default();
+        // template = bottom strip of prev; in `new` it sits 120 rows higher
+        let (ty, conf) = find_overlap(&prev, &new, &cfg, None).expect("match");
+        let t = template_height(prev.height(), &cfg);
+        assert_eq!((prev.height() - t) - ty, 120);
+        assert!(conf > 0.8);
+    }
+
+    #[test]
+    fn find_overlap_rejects_flat_template() {
+        let flat = RgbaImage::from_pixel(300, 300, Rgba([255, 255, 255, 255]));
+        let e = edges(&flat);
+        let cfg = StitchConfig::default();
+        assert!(find_overlap(&e, &e, &cfg, None).is_none());
+    }
+
+    #[test]
+    fn inertia_window_excludes_far_matches() {
+        let src = make_source(300, 2000, 9);
+        let prev = edges(&viewport(&src, 0, 300));
+        let new = edges(&viewport(&src, 40, 300));
+        let cfg = StitchConfig { inertia_px: 20, ..StitchConfig::default() };
+        let t = template_height(prev.height(), &cfg);
+        // true ty for a 40px scroll:
+        let true_ty = (prev.height() - t) - 40;
+        // expectation centered 200px away from truth with a ±20px window
+        let far_expected = true_ty.saturating_sub(200);
+        let found = find_overlap(&prev, &new, &cfg, Some(far_expected));
+        // the true position is outside the window, so either nothing is found
+        // or whatever is found is NOT the true offset with high confidence
+        if let Some((ty, conf)) = found {
+            assert!(ty != true_ty || conf < cfg.min_confidence);
+        }
     }
 }
