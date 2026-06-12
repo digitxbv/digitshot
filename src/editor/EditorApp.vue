@@ -69,13 +69,13 @@
               }" />
 
             <!-- Blur selection outline (above everything except transformer) -->
-            <v-rect v-if="selectedBlur" :config="{
+            <v-rect v-if="selectedBlur && !exporting" :config="{
               x: selectedBlur.x, y: selectedBlur.y,
               width: selectedBlur.width, height: selectedBlur.height,
               stroke: '#0a84ff', strokeWidth: 1.5, dash: [4, 3], listening: false }" />
 
             <!-- Crop draft: dim rects + dashed outline -->
-            <template v-if="(drafting && state.tool === 'crop' && draftRect) || pendingCrop">
+            <template v-if="((drafting && state.tool === 'crop' && draftRect) || pendingCrop) && !exporting">
               <v-rect v-for="(dr, i) in cropDimRects" :key="i"
                 :config="{ ...dr, fill: 'rgba(0,0,0,0.45)', listening: false }" />
               <v-rect v-if="draftRect"
@@ -165,6 +165,22 @@ const dragCurrent = ref<Point | null>(null);
 
 // Crop state
 const pendingCrop = ref<Rect | null>(null);
+
+// Hides transient overlays (crop dim/outline, blur selection) while the
+// stage is flattened for export — they must never bake into the output.
+const exporting = ref(false);
+
+async function exportFlatten(): Promise<HTMLCanvasElement> {
+  exporting.value = true;
+  try {
+    const stage = stageRef.value.getNode();
+    const tr = transformerRef.value.getNode();
+    // flattenStage waits a render cycle, which also flushes the overlay removal
+    return await flattenStage(stage, tr, scale.value);
+  } finally {
+    exporting.value = false;
+  }
+}
 
 // Resize state
 const showResize = ref(false);
@@ -486,10 +502,9 @@ function cancelCrop() {
 
 async function applyCrop() {
   if (!pendingCrop.value) return;
-  const stage = stageRef.value.getNode();
-  const tr = transformerRef.value.getNode();
-  const canvas = await flattenStage(stage, tr, scale.value);
-  const out = cropCanvas(canvas, pendingCrop.value);
+  const region = pendingCrop.value;
+  const canvas = await exportFlatten();
+  const out = cropCanvas(canvas, region);
   pendingCrop.value = null;
   resetDraft();
   state.tool = "select";
@@ -545,9 +560,7 @@ async function applyResize() {
     return;
   }
   resizeError.value = "";
-  const stage = stageRef.value.getNode();
-  const tr = transformerRef.value.getNode();
-  const canvas = await flattenStage(stage, tr, scale.value);
+  const canvas = await exportFlatten();
   showResize.value = false;
   replaceBase(scaleCanvas(canvas, w, h));
 }
