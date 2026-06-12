@@ -250,7 +250,9 @@ watch(
     } else {
       tr.nodes([]);
     }
-  }
+  },
+  // post flush: the Konva node for a freshly drawn shape must exist before findOne
+  { flush: "post" }
 );
 
 function resetDraft() {
