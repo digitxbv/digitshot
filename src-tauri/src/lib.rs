@@ -343,8 +343,8 @@ fn position_scroll_panel(app: AppHandle, region: scrolling::Region) -> Result<()
     let scale = monitor.scale_factor();
     let mon_h = monitor.size().height as f64 / scale;
     let mon_w = monitor.size().width as f64 / scale;
-    const PANEL_W: f64 = 380.0;
-    const PANEL_H: f64 = 52.0;
+    const PANEL_W: f64 = 440.0;
+    const PANEL_H: f64 = 64.0;
     let mut y = (region.y + region.height) as f64 + 12.0;
     if y + PANEL_H > mon_h {
         y = (region.y as f64 - PANEL_H - 12.0).max(8.0);

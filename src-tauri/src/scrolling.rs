@@ -27,7 +27,7 @@ struct ProgressPayload {
 
 #[derive(Clone, Serialize)]
 struct StatusPayload {
-    too_fast: bool,
+    state: &'static str, // "locked" | "lost"
 }
 
 pub struct Session {
@@ -38,7 +38,11 @@ pub struct Session {
 #[derive(Default)]
 pub struct ScrollState(pub Mutex<Option<Session>>);
 
-const FRAME_INTERVAL_MS: u64 = 140;
+/// Settle time before the first frame so the collapsing veil never bakes in.
+const FIRST_FRAME_DELAY_MS: u64 = 150;
+/// Tiny breather between frames; real pacing comes from the capture call
+/// itself (CGWindowListCreateImage takes tens of ms for large regions).
+const LOOP_BREATHER_MS: u64 = 15;
 
 pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
     // Verify the primary monitor is reachable before spawning the thread.
@@ -55,11 +59,16 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
         let mut frames: u32 = 0;
         let mut lowconf_run: u32 = 0;
         let mut warned = false;
-        while !stop_t.load(Ordering::Relaxed) {
-            // Sleep BEFORE the first frame: the selector veil has just been
-            // shrunk into the control panel and the window move must settle,
-            // or the veil gets baked into frame 1.
-            std::thread::sleep(std::time::Duration::from_millis(FRAME_INTERVAL_MS));
+
+        // Settle time: the selector veil has just been shrunk into the control
+        // panel and the window move must settle, or the veil gets baked into
+        // frame 1.
+        std::thread::sleep(std::time::Duration::from_millis(FIRST_FRAME_DELAY_MS));
+        if stop_t.load(Ordering::Relaxed) {
+            return stitcher;
+        }
+
+        loop {
             if stop_t.load(Ordering::Relaxed) {
                 break;
             }
@@ -83,14 +92,14 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
                             lowconf_run += 1;
                             if lowconf_run >= 2 && !warned {
                                 warned = true;
-                                let _ = app.emit("scroll-status", StatusPayload { too_fast: true });
+                                let _ = app.emit("scroll-status", StatusPayload { state: "lost" });
                             }
                         }
                         PushResult::AppendedRows(_) | PushResult::HardAppended => {
                             lowconf_run = 0;
                             if warned {
                                 warned = false;
-                                let _ = app.emit("scroll-status", StatusPayload { too_fast: false });
+                                let _ = app.emit("scroll-status", StatusPayload { state: "locked" });
                             }
                         }
                         _ => {}
@@ -107,6 +116,7 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
                     break;
                 }
             }
+            std::thread::sleep(std::time::Duration::from_millis(LOOP_BREATHER_MS));
         }
         stitcher
     });

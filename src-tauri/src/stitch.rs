@@ -121,16 +121,16 @@ fn downscale(img: &GrayImage, k: u32) -> GrayImage {
     )
 }
 
-/// Coarse-to-fine: frames wider than ~480px are matched on a k-times
-/// downscaled copy first (cheap), then refined at full resolution in a
-/// +/-(2k+4) row window around the coarse hit — pixel-exact result at a
+/// Windowed coarse-to-fine search core. Frames wider than ~480px are matched
+/// on a k-times downscaled copy first (cheap), then refined at full resolution
+/// in a +/-(2k+4) row window around the coarse hit — pixel-exact result at a
 /// fraction of the cost. Essential for Retina-resolution frames.
 ///
-/// The coarse ty is converted to full-resolution via the scroll-delta
-/// domain (delta_small * k ≈ delta_full), which is scale-invariant and
-/// avoids template-height rounding errors:
+/// The coarse ty is converted to full-resolution via the scroll-delta domain
+/// (delta_small * k ≈ delta_full), which is scale-invariant and avoids
+/// template-height rounding errors:
 ///   full_expected = (h_full - t_full) - ((small_h - t_small) - coarse_ty) * k
-pub(crate) fn find_overlap(
+pub(crate) fn find_overlap_inner(
     prev: &GrayImage,
     new: &GrayImage,
     cfg: &StitchConfig,
@@ -160,6 +160,34 @@ pub(crate) fn find_overlap(
     let delta_small = (small_h - t_small).saturating_sub(coarse_ty);
     let full_expected = (h_full - t_full).saturating_sub(delta_small * k);
     ncc_search(prev, new, cfg, Some(full_expected), 2 * k + 8)
+}
+
+/// Two-attempt search wrapper: first tries the windowed search (inertia-based),
+/// then always runs a full-range search when `expected_ty` was Some (i.e., we
+/// had an inertia window that might have found a false positive). Returns
+/// whichever result has higher confidence.
+pub(crate) fn find_overlap(
+    prev: &GrayImage,
+    new: &GrayImage,
+    cfg: &StitchConfig,
+    expected_ty: Option<u32>,
+) -> Option<(u32, f32)> {
+    let windowed = find_overlap_inner(prev, new, cfg, expected_ty);
+
+    // When an inertia window was used, run a full-range search too and take
+    // the higher-confidence result. The window can find false positives (small
+    // spurious matches) when the actual scroll step changes dramatically;
+    // the full-range search finds the globally best match.
+    if expected_ty.is_some() {
+        let full = find_overlap_inner(prev, new, cfg, None);
+        let windowed_conf = windowed.map(|(_, c)| c).unwrap_or(0.0);
+        let full_conf = full.map(|(_, c)| c).unwrap_or(0.0);
+        if full_conf > windowed_conf {
+            return full;
+        }
+    }
+
+    windowed
 }
 
 #[derive(Debug)]
@@ -487,6 +515,9 @@ mod tests {
 
     #[test]
     fn inertia_window_excludes_far_matches() {
+        // This test proves the WINDOW restricts the search. The windowed core
+        // (`find_overlap_inner`) is called directly; `find_overlap` (the wrapper)
+        // adds a full-range fallback on top and would recover the true position.
         let src = make_source(300, 2000, 9);
         let prev = edges(&viewport(&src, 0, 300));
         let new = edges(&viewport(&src, 40, 300));
@@ -496,7 +527,7 @@ mod tests {
         let true_ty = (prev.height() - t) - 40;
         // expectation centered 200px away from truth with a ±20px window
         let far_expected = true_ty.saturating_sub(200);
-        let found = find_overlap(&prev, &new, &cfg, Some(far_expected));
+        let found = find_overlap_inner(&prev, &new, &cfg, Some(far_expected));
         // the true position is outside the window, so either nothing is found
         // or whatever is found is NOT the true offset with high confidence
         if let Some((ty, conf)) = found {
@@ -624,6 +655,32 @@ mod tests {
         let a = viewport(&src, 0, 300);
         let b = viewport(&src, 120, 300);
         assert!(detect_active_columns(&a, &b).is_none());
+    }
+
+    #[test]
+    fn bursty_scroll_speed_recovers_via_full_search() {
+        // Scroll step jumps from 60 to 700 rows — far beyond the inertia
+        // window around the expected position — while plenty of overlap
+        // remains (view 1200, template ~240). Matching must fall back to a
+        // full-range search and append exactly.
+        let src = make_source(300, 3000, 61);
+        let view = 1200;
+        let offsets = [0u32, 60, 760, 820];
+        let mut s = Stitcher::new(StitchConfig::default());
+        let results: Vec<_> = offsets
+            .iter()
+            .map(|o| s.push_frame(&viewport(&src, *o, view)))
+            .collect();
+        assert!(matches!(results[0], PushResult::First));
+        let expect = [60u32, 700, 60];
+        for (i, r) in results[1..].iter().enumerate() {
+            match r {
+                PushResult::AppendedRows(d) => assert_eq!(*d, expect[i], "frame {}", i + 1),
+                other => panic!("frame {} got {:?}", i + 1, other),
+            }
+        }
+        let out = s.finish();
+        assert_eq!(out, viewport(&src, 0, 820 + view));
     }
 
     #[test]
