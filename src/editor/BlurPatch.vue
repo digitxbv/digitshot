@@ -23,7 +23,10 @@ const config = computed(() => ({
     width: props.shape.width,
     height: props.shape.height,
   },
-  filters: [Konva.Filters.Pixelate],
+  // Blur first to destroy glyph edges, then pixelate on top — pixelation
+  // alone leaves readable letter shapes at Retina resolutions.
+  filters: [Konva.Filters.Blur, Konva.Filters.Pixelate],
+  blurRadius: props.shape.pixelSize,
   pixelSize: props.shape.pixelSize,
   listening: true,
   draggable: false,

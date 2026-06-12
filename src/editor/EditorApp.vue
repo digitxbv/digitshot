@@ -492,7 +492,9 @@ function onMouseUp(_e: any) {
       kind: "blur",
       id: shapeId(),
       ...clamped,
-      pixelSize: Math.max(8, Math.round(Math.min(clamped.width, clamped.height) / 12)),
+      // Blocks must defeat Retina-resolution text: floor of 24 image px,
+      // growing with the region, capped so huge regions stay recognizable as redaction.
+      pixelSize: Math.min(64, Math.max(24, Math.round(Math.min(clamped.width, clamped.height) / 8))),
     });
     commit();
     // Stay in blur mode, same as rect.
