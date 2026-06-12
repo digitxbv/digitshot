@@ -443,6 +443,16 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Menubar app: hiding/closing every window must NOT quit the
+                // app. Only an explicit exit (tray Quit -> app.exit(0), code
+                // Some) may pass.
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
