@@ -116,6 +116,160 @@ pub(crate) fn find_overlap(
     Some((lo + ex.max_value_location.1, conf))
 }
 
+#[derive(Debug)]
+pub enum PushResult {
+    First,
+    AppendedRows(u32),
+    SkippedDuplicate,
+    SkippedLowConfidence,
+    HardAppended,
+}
+
+pub struct Stitcher {
+    cfg: StitchConfig,
+    canvas: Option<RgbaImage>,
+    last: Option<RgbaImage>,
+    /// (top, bottom) sticky row counts, detected once from the first scrolled pair.
+    sticky: Option<(u32, u32)>,
+    /// Sticky footer strip, re-appended once at finish().
+    footer: Option<RgbaImage>,
+    last_delta: Option<u32>,
+    lowconf_streak: u32,
+}
+
+impl Stitcher {
+    pub fn new(cfg: StitchConfig) -> Self {
+        Self {
+            cfg,
+            canvas: None,
+            last: None,
+            sticky: None,
+            footer: None,
+            last_delta: None,
+            lowconf_streak: 0,
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        self.canvas.as_ref().map(|c| c.height()).unwrap_or(0)
+            + self.footer.as_ref().map(|f| f.height()).unwrap_or(0)
+    }
+
+    fn effective(&self, f: &RgbaImage) -> RgbaImage {
+        let (top, bottom) = self.sticky.unwrap_or((0, 0));
+        imageops::crop_imm(f, 0, top, f.width(), f.height() - top - bottom).to_image()
+    }
+
+    pub fn push_frame(&mut self, f: &RgbaImage) -> PushResult {
+        let Some(last) = self.last.clone() else {
+            self.canvas = Some(f.clone());
+            self.last = Some(f.clone());
+            return PushResult::First;
+        };
+
+        if frames_nearly_equal(f, &last) {
+            return PushResult::SkippedDuplicate;
+        }
+
+        // First scrolled pair: detect sticky edges and retroactively trim
+        // the footer off the canvas (it re-attaches once at finish()).
+        if self.sticky.is_none() {
+            let (top, bottom) = detect_sticky(&last, f);
+            self.sticky = Some((top, bottom));
+            if bottom > 0 {
+                let canvas = self.canvas.take().unwrap();
+                let h = canvas.height();
+                self.footer = Some(
+                    imageops::crop_imm(&canvas, 0, h - bottom, canvas.width(), bottom).to_image(),
+                );
+                self.canvas = Some(
+                    imageops::crop_imm(&canvas, 0, 0, canvas.width(), h - bottom).to_image(),
+                );
+            }
+        }
+
+        let prev_eff = edges(&self.effective(&last));
+        let new_eff_rgba = self.effective(f);
+        let new_eff = edges(&new_eff_rgba);
+        let eff_h = prev_eff.height();
+        let t = template_height(eff_h, &self.cfg);
+        let expected_ty = self.last_delta.map(|d| (eff_h - t).saturating_sub(d));
+
+        match find_overlap(&prev_eff, &new_eff, &self.cfg, expected_ty) {
+            Some((ty, conf)) if conf >= self.cfg.min_confidence => {
+                let delta = (eff_h - t).saturating_sub(ty);
+                if delta == 0 {
+                    return PushResult::SkippedDuplicate;
+                }
+                let new_rows = imageops::crop_imm(
+                    &new_eff_rgba,
+                    0,
+                    eff_h - delta,
+                    new_eff_rgba.width(),
+                    delta,
+                )
+                .to_image();
+                self.canvas = Some(vstack(self.canvas.as_ref().unwrap(), &new_rows));
+                self.last = Some(f.clone());
+                self.last_delta = Some(delta);
+                self.lowconf_streak = 0;
+                PushResult::AppendedRows(delta)
+            }
+            _ => {
+                self.lowconf_streak += 1;
+                if self.lowconf_streak >= self.cfg.max_lowconf_streak {
+                    // Lost track (scrolled too fast / blank content): append the
+                    // whole effective frame; a seam beats losing the content.
+                    self.canvas = Some(vstack(self.canvas.as_ref().unwrap(), &new_eff_rgba));
+                    self.last = Some(f.clone());
+                    self.last_delta = None;
+                    self.lowconf_streak = 0;
+                    PushResult::HardAppended
+                } else {
+                    PushResult::SkippedLowConfidence
+                }
+            }
+        }
+    }
+
+    pub fn finish(self) -> RgbaImage {
+        let canvas = self.canvas.expect("finish() before any frame");
+        match self.footer {
+            Some(footer) => vstack(&canvas, &footer),
+            None => canvas,
+        }
+    }
+}
+
+/// Rows identical between two frames that OTHERWISE differ are fixed UI
+/// chrome (sticky headers/footers). Counts consecutive identical rows from
+/// the top and bottom; each capped at 30% of frame height.
+pub(crate) fn detect_sticky(a: &RgbaImage, b: &RgbaImage) -> (u32, u32) {
+    let h = a.height();
+    let cap = (h as f32 * 0.3) as u32;
+    let row_same = |y: u32| -> bool {
+        let (w, mut diff, mut n) = (a.width(), 0u32, 0u32);
+        for x in (0..w).step_by(4) {
+            let pa = a.get_pixel(x, y).0;
+            let pb = b.get_pixel(x, y).0;
+            if (0..3).any(|c| (pa[c] as i32 - pb[c] as i32).abs() > 10) {
+                diff += 1;
+            }
+            n += 1;
+        }
+        (diff as f32 / n as f32) < 0.02
+    };
+    let mut top = 0;
+    while top < cap && row_same(top) {
+        top += 1;
+    }
+    let mut bottom = 0;
+    while bottom < cap && row_same(h - 1 - bottom) {
+        bottom += 1;
+    }
+    (top, bottom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +367,83 @@ mod tests {
         if let Some((ty, conf)) = found {
             assert!(ty != true_ty || conf < cfg.min_confidence);
         }
+    }
+
+    fn push_all(stitcher: &mut Stitcher, frames: &[RgbaImage]) -> Vec<PushResult> {
+        frames.iter().map(|f| stitcher.push_frame(f)).collect()
+    }
+
+    #[test]
+    fn stitches_scrolled_frames_back_into_source() {
+        let src = make_source(300, 1200, 11);
+        let view = 300;
+        let offsets = [0u32, 130, 260, 430, 600];
+        let frames: Vec<_> = offsets.iter().map(|o| viewport(&src, *o, view)).collect();
+        let mut s = Stitcher::new(StitchConfig::default());
+        let results = push_all(&mut s, &frames);
+        assert!(matches!(results[0], PushResult::First));
+        for r in &results[1..] {
+            assert!(matches!(r, PushResult::AppendedRows(_)), "got {r:?}");
+        }
+        let out = s.finish();
+        let expected = viewport(&src, 0, 600 + view);
+        assert_eq!(out.dimensions(), expected.dimensions());
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn duplicate_frames_are_skipped() {
+        let src = make_source(300, 600, 13);
+        let f = viewport(&src, 0, 300);
+        let mut s = Stitcher::new(StitchConfig::default());
+        s.push_frame(&f);
+        assert!(matches!(s.push_frame(&f), PushResult::SkippedDuplicate));
+        assert_eq!(s.finish().dimensions(), (300, 300));
+    }
+
+    #[test]
+    fn sticky_header_and_footer_appear_once() {
+        let content = make_source(300, 1500, 17);
+        let header = make_source(300, 40, 99);
+        let footer = make_source(300, 30, 101);
+        let view = 300;
+        let body_h = view - 40 - 30;
+        let frame = |off: u32| {
+            let body = viewport(&content, off, body_h);
+            vstack(&vstack(&header, &body), &footer)
+        };
+        let offsets = [0u32, 100, 200, 300];
+        let frames: Vec<_> = offsets.iter().map(|o| frame(*o)).collect();
+        let mut s = Stitcher::new(StitchConfig::default());
+        push_all(&mut s, &frames);
+        let out = s.finish();
+        // header once + full scrolled body + footer once
+        let expected = vstack(&vstack(&header, &viewport(&content, 0, 300 + body_h)), &footer);
+        assert_eq!(out.dimensions(), expected.dimensions());
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn lowconf_streak_hard_appends() {
+        let src = make_source(300, 600, 19);
+        let mut s = Stitcher::new(StitchConfig::default());
+        s.push_frame(&viewport(&src, 0, 300));
+        let flat = RgbaImage::from_pixel(300, 300, Rgba([250, 250, 250, 255]));
+        assert!(matches!(s.push_frame(&flat), PushResult::SkippedLowConfidence));
+        // slightly different flats so the duplicate check doesn't trip first
+        let flat2 = RgbaImage::from_pixel(300, 300, Rgba([244, 244, 244, 255]));
+        let flat3 = RgbaImage::from_pixel(300, 300, Rgba([238, 238, 238, 255]));
+        assert!(matches!(s.push_frame(&flat2), PushResult::SkippedLowConfidence));
+        assert!(matches!(s.push_frame(&flat3), PushResult::HardAppended));
+        assert_eq!(s.finish().height(), 600);
+    }
+
+    #[test]
+    fn single_frame_finish_returns_it() {
+        let src = make_source(300, 400, 23);
+        let f = viewport(&src, 0, 300);
+        let mut s = Stitcher::new(StitchConfig::default());
+        s.push_frame(&f);
+        assert_eq!(s.finish(), f);
     }
 }
