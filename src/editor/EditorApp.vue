@@ -1,6 +1,7 @@
 <template>
   <div class="editor">
-    <div class="toolbar">
+    <div class="toolbar" :class="{ dev: isDev }">
+      <span v-if="isDev" class="dev-badge">DEV</span>
       <button v-for="t in tools" :key="t.id"
         :class="{ active: state.tool === t.id }"
         @click="state.tool = t.id">{{ t.label }}</button>
@@ -140,6 +141,8 @@ import { History } from "./history";
 import { fitScale, normalizeRect, clampRect, aspectResize, type Point, type Rect } from "./geometry";
 import BlurPatch from "./BlurPatch.vue";
 import { flattenStage, cropCanvas, scaleCanvas } from "./flatten";
+
+const isDev = import.meta.env.DEV;
 
 const state = createEditorState();
 let history: History<EditorSnapshot> | null = null;
@@ -717,6 +720,18 @@ defineExpose({ pointerInImage, commit, state, scale });
   padding: 0 10px;
   align-items: center;
   flex-shrink: 0;
+}
+.toolbar.dev {
+  background: #4a2a10; /* unmistakable orange-brown instead of #2c2c2e */
+}
+.dev-badge {
+  background: #ff9f0a;
+  color: #1c1c1e;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 .toolbar button {
   background: rgba(255, 255, 255, 0.12);

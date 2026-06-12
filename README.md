@@ -67,6 +67,8 @@ npm install
 npm run tauri dev
 ```
 
+Dev builds (`npm run tauri dev`) use `Cmd+Shift+1`, show a **DEV** menubar label next to the tray icon, and display orange accents in the editor toolbar and overlay cards — so a dev instance can run alongside the installed release app (which uses `Cmd+Shift+2`) without conflict.
+
 **Tests**
 
 ```bash

@@ -107,7 +107,7 @@ fn open_editor(app: AppHandle, path: String) -> Result<(), String> {
     } else {
         let url = format!("editor.html?path={}", urlencoding::encode(&path));
         tauri::WebviewWindowBuilder::new(&app, "editor", tauri::WebviewUrl::App(url.into()))
-            .title("DigitShot")
+            .title(if cfg!(debug_assertions) { "DigitShot Dev" } else { "DigitShot" })
             .inner_size(1160.0, 800.0)
             .build()
             .map_err(|e| e.to_string())?;
@@ -188,12 +188,18 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Global shortcut: Cmd+Shift+2
+            // Global shortcut: Cmd+Shift+2 (release) / Cmd+Shift+1 (dev)
+            // Dev builds use Cmd+Shift+1 so a dev instance can run alongside the
+            // installed release app (Cmd+Shift+2) without fighting over the hotkey.
             {
                 use tauri_plugin_global_shortcut::{
                     Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
                 };
-                let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit2);
+                let shortcut = if cfg!(debug_assertions) {
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit1)
+                } else {
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Digit2)
+                };
                 app.handle().plugin(
                     tauri_plugin_global_shortcut::Builder::new()
                         .with_handler(move |app, sc, event| {
@@ -214,7 +220,7 @@ pub fn run() {
                 MenuItem::with_id(app, "folder", "Open Captures Folder", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit DigitShot", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&capture_item, &folder_item, &quit_item])?;
-            TrayIconBuilder::new()
+            let mut tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -227,8 +233,12 @@ pub fn run() {
                     }
                     "quit" => app.exit(0),
                     _ => {}
-                })
-                .build(app)?;
+                });
+            #[cfg(target_os = "macos")]
+            if cfg!(debug_assertions) {
+                tray = tray.title("DEV");
+            }
+            tray.build(app)?;
 
             // NSPanel overlay setup
             #[cfg(target_os = "macos")]
