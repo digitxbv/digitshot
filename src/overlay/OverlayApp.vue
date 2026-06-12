@@ -26,6 +26,8 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createQueue, type CaptureItem } from "./queue";
 
+const STORAGE_KEY = "digitshot.queue.v1";
+
 const CARD_W = 224;
 const CARD_H = 140;
 const GAP = 10;
@@ -51,6 +53,10 @@ async function syncWindow() {
 }
 
 watch(() => queue.items.length, syncWindow);
+watch(
+  () => queue.items.map((i) => i.path + ":" + i.version).join("|"),
+  () => localStorage.setItem(STORAGE_KEY, JSON.stringify(queue.serialize())),
+);
 
 function edit(item: CaptureItem) {
   invoke("open_editor", { path: item.path });
@@ -66,6 +72,20 @@ function dismiss(item: CaptureItem) {
 }
 
 onMounted(async () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const stored: { path: string; version: number }[] = JSON.parse(raw);
+      const alive = await invoke<string[]>("filter_existing", {
+        paths: stored.map((s) => s.path),
+      });
+      queue.restore(stored.filter((s) => alive.includes(s.path)));
+      syncWindow();
+    }
+  } catch (e) {
+    console.warn("queue restore failed", e);
+  }
+
   await listen<{ path: string }>("capture-taken", (e) => {
     queue.add(e.payload.path);
     syncWindow();

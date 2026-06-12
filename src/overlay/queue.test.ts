@@ -41,3 +41,29 @@ describe("capture queue", () => {
     expect(q.items.map((i) => i.path)).toEqual(["/a.png", "/b.png"]);
   });
 });
+
+describe("queue persistence", () => {
+  it("serialize round-trips through restore", () => {
+    const q = createQueue(5);
+    q.add("/a.png");
+    q.add("/b.png");
+    q.touch("/b.png");
+    const data = q.serialize();
+    const q2 = createQueue(5);
+    q2.restore(data);
+    expect(q2.items).toEqual(q.items.map((i) => ({ ...i })));
+  });
+
+  it("restore drops entries beyond max and tolerates garbage", () => {
+    const q = createQueue(2);
+    q.restore([
+      { path: "/a.png", version: 1 },
+      { path: "/b.png", version: 0 },
+      { path: "/c.png", version: 0 },
+    ]);
+    expect(q.items.length).toBe(2);
+    const q2 = createQueue(5);
+    q2.restore("nonsense" as unknown as []);
+    expect(q2.items.length).toBe(0);
+  });
+});

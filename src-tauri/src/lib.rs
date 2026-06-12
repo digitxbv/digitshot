@@ -176,6 +176,14 @@ fn hide_overlay(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn filter_existing(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|p| std::path::Path::new(p).exists())
+        .collect()
+}
+
 /// Entry point for tray/hotkey/selector. Gates on the Screen Recording grant.
 fn begin_scroll_capture(app: &AppHandle) {
     if !permissions::has_screen_recording() {
@@ -323,6 +331,7 @@ pub fn run() {
             scroll_capture_stop,
             scroll_capture_cancel,
             position_scroll_panel,
+            filter_existing,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
