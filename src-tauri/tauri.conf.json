@@ -26,6 +26,35 @@
         "acceptFirstMouse": true,
         "width": 260,
         "height": 180
+      },
+      {
+        "label": "selector",
+        "url": "selector.html",
+        "title": "DigitShot Selector",
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "acceptFirstMouse": true,
+        "width": 400,
+        "height": 300
+      },
+      {
+        "label": "frame",
+        "url": "frame.html",
+        "title": "DigitShot Frame",
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "width": 400,
+        "height": 300
       }
     ],
     "security": {

@@ -25,5 +25,20 @@ export function createQueue(max: number) {
     if (item) item.version++;
   }
 
-  return { items, add, dismiss, touch };
+  function serialize(): CaptureItem[] {
+    return items.map((i) => ({ ...i }));
+  }
+
+  function restore(data: unknown) {
+    items.length = 0;
+    if (!Array.isArray(data)) return;
+    for (const entry of data.slice(0, max)) {
+      const e = entry as { path?: unknown; version?: unknown };
+      if (e && typeof e.path === "string" && typeof e.version === "number") {
+        items.push({ path: e.path, version: e.version });
+      }
+    }
+  }
+
+  return { items, add, dismiss, touch, serialize, restore };
 }

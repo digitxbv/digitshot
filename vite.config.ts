@@ -19,6 +19,8 @@ export default defineConfig(async () => ({
       input: {
         main: resolve(__dirname, "index.html"),
         editor: resolve(__dirname, "editor.html"),
+        selector: resolve(__dirname, "selector.html"),
+        frame: resolve(__dirname, "frame.html"),
       },
     },
   },
