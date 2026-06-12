@@ -4,6 +4,7 @@
       v-for="item in displayItems"
       :key="item.path"
       class="card"
+      :class="{ dev: isDev }"
       @click="edit(item)"
     >
       <img :src="src(item)" alt="" draggable="false" />
@@ -19,6 +20,8 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, watch } from "vue";
+
+const isDev = import.meta.env.DEV;
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createQueue, type CaptureItem } from "./queue";
@@ -129,5 +132,8 @@ onMounted(async () => {
 }
 .actions .dismiss {
   flex: 0 0 28px;
+}
+.card.dev {
+  border-color: rgba(255, 159, 10, 0.85);
 }
 </style>
