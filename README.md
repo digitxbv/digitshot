@@ -1,87 +1,88 @@
 # DigitShot
 
-Personal CleanShot X-style screenshot tool for macOS. Menubar-only app (no Dock icon) built with Tauri 2 + Vue 3 + Konva.js.
+Open-source CleanShot-style screenshot tool for macOS, built with Tauri 2 (Rust) + Vue 3.
 
-## Phase 1 features
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Capture**
+---
 
-- Global hotkey `Cmd+Shift+2` triggers macOS native interactive capture: drag to select a region, Space to pick a window, Esc to cancel.
-- On success: PNG is saved to `~/Pictures/DigitShot/<yyyy-MM-dd HH.mm.ss>.png` and auto-copied to the clipboard.
+## Features
 
-**Thumbnail queue**
+- **Instant area/window capture** via native `screencapture -i` — the system crosshair and window-picker UI, no Screen Recording permission required. Press Space during selection to switch to window-pick mode; Esc cancels.
+- **Auto-copy + save** — captured PNG is copied to the clipboard and saved to `~/Pictures/DigitShot/<yyyy-MM-dd HH.mm.ss>.png`.
+- **Floating thumbnail queue** — pinned to the bottom-left corner, visible on all Spaces and over fullscreen apps, never steals keyboard focus. Hover a card to reveal **Edit / Copy / Finder / Dismiss** actions. Queue persists across restarts; entries whose files have been deleted are silently dropped on launch.
+- **Annotation editor** — rectangle tool (5 colors: red/blue/green/yellow/black; 3 stroke widths: 2/4/6 px), pixelate blur, crop, and resize with optional aspect lock. Undo/redo. Copy, Save, and Save As all export at full native (Retina) resolution.
+- **Scrolling capture** — drag a region over scrollable content, click Start Capture, scroll at a normal pace, click Done. The stitcher assembles a full-resolution tall PNG and delivers it into the same pipeline (clipboard, thumbnail queue, editor). A status ring overlaid on the region turns red when the stitcher loses track (scroll back up until it turns green), and green when it is locked.
+- **Menubar-only** — no Dock icon; lives entirely in the system tray.
 
-- Floating overlay pinned to the bottom-left of the primary screen, visible on all Spaces and over fullscreen apps, never steals key focus.
-- Newest capture appears at the bottom; max 5 thumbnails at once.
-- Hover a card to reveal action buttons: **Edit · Copy · Finder · ✕ (Dismiss)**. Clicking a card opens the editor.
-- Thumbnails survive app restarts; any entry whose file has been deleted is silently dropped on launch.
+---
 
-**Tray menu**
+## Install
 
-- **Capture Area** — same as the hotkey.
-- **Scrolling Capture** — starts a scrolling capture session (see below).
-- **Open Captures Folder** — reveals `~/Pictures/DigitShot/` in Finder.
-- **Quit DigitShot**
+### Download (macOS, unsigned)
 
-**Editor**
+Download the `.dmg` from [GitHub Releases](https://github.com/digitxbv/digitshot/releases) and drag **DigitShot.app** to `/Applications`.
 
-Opens per capture. Tools:
+> **Gatekeeper warning:** builds are not notarized. macOS will block the first launch with "Apple cannot check it for malicious software."
+>
+> Workaround — either:
+> - Right-click the app in Finder → **Open** → **Open** in the dialog, or
+> - Run once in Terminal: `xattr -d com.apple.quarantine /Applications/DigitShot.app`
 
-| Tool | Notes |
+### Build from source
+
+**Prerequisites**
+
+- Rust stable (`rustup` — [rustup.rs](https://rustup.rs))
+- Node 18+
+- Xcode Command Line Tools (`xcode-select --install`)
+
+```bash
+git clone https://github.com/digitxbv/digitshot.git
+cd digitshot
+npm install
+npm run tauri build
+```
+
+The app bundle lands at `src-tauri/target/release/bundle/macos/DigitShot.app`. The `.dmg` is in the same directory.
+
+---
+
+## Usage
+
+### Hotkeys (release build)
+
+| Hotkey | Action |
 |---|---|
-| Select | Move and resize committed shapes via drag handles. |
-| Rectangle | Draw a stroke rectangle; pick color (red/blue/green/yellow/black) and stroke width (2/4/6 px). |
-| Blur | Draw a pixelated blur region over the image. Fixed once committed — delete and redraw to adjust. |
-| Crop | Drag to define crop region, then confirm or cancel via the bar that appears. |
+| `Cmd+Shift+2` | Capture area/window — drag to select, Space to pick a window, Esc to cancel |
+| `Cmd+Shift+6` | Start scrolling capture |
 
-Resize dialog (`Resize…` button): set output dimensions in pixels, with optional aspect-lock. Capped at 4× the current size.
+### Tray menu
 
-Images taller than a 2:1 aspect ratio (typical of stitched scrolling captures) are fit to the viewport width and scroll vertically, keeping the full image reachable.
-
-Keyboard shortcuts in the editor:
-
-| Shortcut | Action |
+| Item | Action |
 |---|---|
-| `Cmd+Z` | Undo |
-| `Shift+Cmd+Z` | Redo |
-| `Delete` / `Backspace` | Remove selected shape |
-| `Esc` | Cancel crop/draft → deselect → close window |
+| Capture Area | Same as `Cmd+Shift+2` |
+| Scrolling Capture | Same as `Cmd+Shift+6` |
+| Open Captures Folder | Reveals `~/Pictures/DigitShot/` in Finder |
+| Quit DigitShot | Exits the app |
 
-Actions: **Copy** (flattened PNG to clipboard), **Save** (overwrite original), **Save As…** — all export at full native resolution.
+### Permissions
 
-## Phase 2 features
+- **Regular capture** — no permissions required; `screencapture -i` handles it natively.
+- **Scrolling capture** — requires Screen Recording (System Settings → Privacy & Security → Screen Recording). Grant it for DigitShot and **relaunch the app** — macOS does not apply the grant to a running process.
 
-**Scrolling capture**
+### Scrolling capture how-to
 
-Trigger via the tray item **Scrolling Capture**, or the global hotkey:
+1. Trigger via `Cmd+Shift+6` or the tray menu.
+2. Drag a selection over **only the scrolling content area** — exclude static sidebars and navigation chrome; the stitcher auto-detects sticky headers/footers but static side columns degrade match quality if included.
+3. Click **Start Capture** in the control panel that appears.
+4. Scroll at a steady, moderate pace. The ring overlaid on your region is:
+   - **Green** — stitcher is locked on the content.
+   - **Red** — stitcher lost track; scroll back up slightly until it turns green, then continue.
+5. Click **Done** when you reach the bottom. The stitched PNG is saved, copied to the clipboard, and added to the thumbnail queue like any regular capture.
+6. Press **Esc** or click **Cancel** at any point to discard the session.
 
-- Release build: `Cmd+Shift+6`
-- Dev build: `Cmd+Shift+0` (3, 4, and 5 are reserved by macOS)
-
-**Flow:**
-
-1. Drag a region over the scrollable content you want to capture.
-2. A control panel appears — scroll the content yourself at a steady pace.
-3. Click **Done** when you reach the bottom.
-4. The stitched tall PNG is automatically saved to `~/Pictures/DigitShot/`, copied to the clipboard, and added to the thumbnail queue — exactly like a regular capture.
-5. Press **Esc** or click **Cancel** at any point to discard the session.
-
-**Permissions:**
-
-Scrolling capture requires the Screen Recording TCC permission (System Settings → Privacy & Security → Screen Recording). Grant it for DigitShot and relaunch the app — macOS does not apply the grant to a running process. macOS may periodically re-prompt to confirm the permission. Dev builds lose the Screen Recording grant after each rebuild unless the dev binary is code-signed with a stable identity.
-
-## Architecture
-
-Capture is delegated entirely to macOS via `screencapture -i`, which provides the native crosshair and window-pick UI without requiring a Screen Recording TCC permission. The floating thumbnail overlay is a non-activating `NSPanel` (via `tauri-nspanel`) configured with `CanJoinAllSpaces` and `FullScreenAuxiliary` collection behaviors, so it floats over fullscreen apps on every Space without ever taking key focus. The editor renders the screenshot as a Konva.js stage background with annotation shapes on top; Copy/Save/Save As flatten the Konva stage to a canvas at 1:1 (native) resolution before encoding to PNG. Crop and Resize both flatten-and-replace the base image, which bakes all current annotations into the new base (undo still restores the pre-operation state).
-
-Reference: [`docs/superpowers/specs/`](docs/superpowers/specs/) for the phase 1 design doc and [`docs/superpowers/plans/`](docs/superpowers/plans/) for implementation plans.
-
-## Known limitations
-
-- Blur regions are fixed once drawn; to adjust, select and delete the region, then redraw.
-- Only one editor window at a time (a second capture reuses the existing window).
-- Hotkeys are not configurable; they are hardcoded in `src-tauri/src/lib.rs`.
-- Crop and Resize bake current annotations into the image; undo still restores the pre-operation state.
+---
 
 ## Development
 
@@ -90,7 +91,7 @@ npm install
 npm run tauri dev
 ```
 
-Dev builds (`npm run tauri dev`) use `Cmd+Shift+1`, show a **DEV** menubar label next to the tray icon, and display orange accents in the editor toolbar and overlay cards — so a dev instance can run alongside the installed release app (which uses `Cmd+Shift+2`) without conflict.
+Dev builds use `Cmd+Shift+1` (capture) and `Cmd+Shift+0` (scrolling capture), display a **DEV** label in the menubar, and show orange accents in the editor toolbar and overlay cards — so a dev instance can run alongside an installed release build without hotkey conflicts.
 
 **Tests**
 
@@ -102,12 +103,29 @@ npm run test
 cd src-tauri && cargo test
 ```
 
-**Production build**
+**Screen Recording caveat for dev builds:** unsigned binaries lose the Screen Recording TCC grant after each rebuild. Re-grant in System Settings and relaunch, or code-sign the dev binary with a stable local identity.
 
-```bash
-npm run tauri build
-```
+---
+
+## How it works
+
+Regular capture delegates entirely to `/usr/sbin/screencapture -i`, which provides the native crosshair and window-pick UI without requiring Screen Recording permission. The floating thumbnail overlay and the scrolling-capture selector are non-activating `NSPanel` windows (via [tauri-nspanel](https://github.com/ahkohd/tauri-nspanel)) configured with `CanJoinAllSpaces` and `FullScreenAuxiliary` collection behaviors — they float over fullscreen apps on every Space without ever stealing key focus. The annotation editor renders the screenshot as a [Konva.js](https://konvajs.org) stage background with annotation shapes on top; Copy/Save/Save As flatten the stage to a canvas at 1:1 native resolution before encoding to PNG.
+
+Scrolling capture records the selected region at ~3 fps via `xcap::Monitor::capture_region`. Each frame is fed to the stitcher (`src-tauri/src/stitch.rs`), a pure Rust engine that matches consecutive frames using edge-domain normalized cross-correlation (NCC) with a coarse-to-fine search: frames wider than ~480 px are first matched on a downscaled copy, then refined at full resolution in a narrow row window — keeping Retina-resolution stitching fast. A sticky header/footer detector strips UI chrome that appears in every frame so it appears only once in the output. Static sidebar columns are detected from the first scrolled pair and excluded from the match region. The finished canvas is saved as a single tall PNG.
+
+Full design documentation: [`docs/superpowers/specs/`](docs/superpowers/specs/).
+
+---
+
+## Known limitations
+
+- Scrolling capture operates on the primary monitor only.
+- Blur regions are fixed once drawn — select and delete the region, then redraw to adjust.
+- Hotkeys are not configurable (hardcoded in `src-tauri/src/lib.rs`).
+- Builds are unsigned and not notarized; see Gatekeeper workaround above.
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — Copyright (c) 2026 [DigitX B.V.](https://digitx.nl) — see [LICENSE](LICENSE).
