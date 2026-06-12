@@ -18,7 +18,7 @@
     </template>
     <div v-else class="shade full" />
     <div class="instructions">
-      <template v-if="mode === 'confirm'">Click Start Capture, then scroll through the content</template>
+      <template v-if="mode === 'confirm'">Click Start Capture, then scroll through the content at a normal pace</template>
       <template v-else>Drag to select ONLY the area that scrolls (avoid sidebars) — Esc to cancel</template>
     </div>
 
@@ -31,11 +31,15 @@
   </div>
 
   <!-- PANEL MODE: floating control bar during capture -->
-  <div v-else class="panel" :class="{ warn: tooFast }">
+  <div v-else class="panel" :class="{ warn: lost }">
     <span class="rec-dot" />
-    <span class="panel-text" v-if="tooFast">Too fast — scroll back a little, then continue slowly</span>
+    <span class="panel-text" v-if="lost">
+      Tracking lost — scroll back up slowly until the border turns green, then continue
+    </span>
     <span class="panel-text" v-else-if="frames === 0">Starting capture…</span>
-    <span class="panel-text" v-else>Scroll slowly · {{ heightPx }}px · {{ frames }} frames</span>
+    <span class="panel-text" v-else>
+      Border is green: everything you scroll past is captured · {{ heightPx }}px
+    </span>
     <button class="done" @click="done">Done</button>
     <button @click="cancel">Cancel</button>
   </div>
@@ -53,7 +57,7 @@ const mode = ref<Mode>("select");
 const rect = ref<Rect | null>(null);
 const frames = ref(0);
 const heightPx = ref(0);
-const tooFast = ref(false);
+const lost = ref(false);
 
 let dragging = false;
 let startX = 0;
@@ -100,7 +104,7 @@ async function startCapture() {
   };
   frames.value = 0;
   heightPx.value = 0;
-  tooFast.value = false;
+  lost.value = false;
   // Shrink the veil into the panel BEFORE starting capture so the veil is
   // never baked into the first frames.
   mode.value = "panel";
@@ -140,7 +144,7 @@ function reset() {
   dragging = false;
   frames.value = 0;
   heightPx.value = 0;
-  tooFast.value = false;
+  lost.value = false;
 }
 
 const confirmBarStyle = computed(() => {
@@ -166,8 +170,8 @@ onMounted(async () => {
     frames.value = e.payload.frames;
     heightPx.value = e.payload.height;
   });
-  await listen<{ too_fast: boolean }>("scroll-status", (e) => {
-    tooFast.value = e.payload.too_fast;
+  await listen<{ state: string }>("scroll-status", (e) => {
+    lost.value = e.payload.state === "lost";
   });
   await listen<string>("scroll-capture-error", () => {
     invoke("scroll_capture_cancel");
@@ -255,9 +259,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+  padding: 6px 12px;
   background: #2c2c2e;
-  border-radius: 10px;
+  border-radius: 12px;
   font: 12px -apple-system, sans-serif;
   color: #fff;
 }
@@ -279,7 +283,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
 }
 .panel-text {
   flex: 1;
-  white-space: nowrap;
+  white-space: normal;   /* was nowrap — text must wrap inside the bubble */
+  line-height: 1.3;
   overflow: hidden;
 }
 .panel button {
