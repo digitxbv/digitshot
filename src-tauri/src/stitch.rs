@@ -71,16 +71,13 @@ pub(crate) fn template_height(eff_h: u32, cfg: &StitchConfig) -> u32 {
     ((eff_h as f32 * cfg.template_ratio) as u32).max(32).min(eff_h.saturating_sub(8))
 }
 
-/// Searches for `prev`'s bottom template strip inside `new` (both edge-domain,
-/// same dimensions). Returns (ty, confidence): ty = row in `new` where the
-/// template's top edge matches. Scroll distance = (h - template_h) - ty.
-/// `expected_ty` (from the previous scroll delta) restricts the search to an
-/// inertia window, defeating repeated-content false matches.
-pub(crate) fn find_overlap(
+/// NCC search core. `expected_ty` + `inertia` restrict the searched rows.
+fn ncc_search(
     prev: &GrayImage,
     new: &GrayImage,
     cfg: &StitchConfig,
     expected_ty: Option<u32>,
+    inertia: u32,
 ) -> Option<(u32, f32)> {
     use imageproc::template_matching::{find_extremes, match_template, MatchTemplateMethod};
 
@@ -93,11 +90,10 @@ pub(crate) fn find_overlap(
         return None;
     }
 
-    // Restrict search rows to the inertia window around the expectation.
     let (lo, hi) = match expected_ty {
         Some(exp) => {
-            let lo = exp.saturating_sub(cfg.inertia_px);
-            let hi = (exp + cfg.inertia_px).min(h - t);
+            let lo = exp.saturating_sub(inertia);
+            let hi = (exp + inertia).min(h - t);
             (lo, hi)
         }
         None => (0, h - t),
@@ -114,6 +110,56 @@ pub(crate) fn find_overlap(
         return None;
     }
     Some((lo + ex.max_value_location.1, conf))
+}
+
+fn downscale(img: &GrayImage, k: u32) -> GrayImage {
+    imageops::resize(
+        img,
+        (img.width() / k).max(1),
+        (img.height() / k).max(1),
+        imageops::FilterType::Triangle,
+    )
+}
+
+/// Coarse-to-fine: frames wider than ~480px are matched on a k-times
+/// downscaled copy first (cheap), then refined at full resolution in a
+/// +/-(2k+4) row window around the coarse hit — pixel-exact result at a
+/// fraction of the cost. Essential for Retina-resolution frames.
+///
+/// The coarse ty is converted to full-resolution via the scroll-delta
+/// domain (delta_small * k ≈ delta_full), which is scale-invariant and
+/// avoids template-height rounding errors:
+///   full_expected = (h_full - t_full) - ((small_h - t_small) - coarse_ty) * k
+pub(crate) fn find_overlap(
+    prev: &GrayImage,
+    new: &GrayImage,
+    cfg: &StitchConfig,
+    expected_ty: Option<u32>,
+) -> Option<(u32, f32)> {
+    let k = (prev.width() / 480).max(1);
+    if k == 1 {
+        return ncc_search(prev, new, cfg, expected_ty, cfg.inertia_px);
+    }
+    let small_prev = downscale(prev, k);
+    let small_new = downscale(new, k);
+    let (coarse_ty, _) = ncc_search(
+        &small_prev,
+        &small_new,
+        cfg,
+        expected_ty.map(|e| e / k),
+        (cfg.inertia_px / k).max(8),
+    )?;
+    // Convert coarse ty to full-resolution via scroll-delta domain:
+    // delta_small = (small_h - t_small) - coarse_ty  (scale-invariant)
+    // full_expected = (h_full - t_full) - delta_small * k
+    // This avoids template-height rounding errors that naive coarse_ty*k incurs.
+    let small_h = small_prev.height();
+    let t_small = template_height(small_h, cfg);
+    let h_full = prev.height();
+    let t_full = template_height(h_full, cfg);
+    let delta_small = (small_h - t_small).saturating_sub(coarse_ty);
+    let full_expected = (h_full - t_full).saturating_sub(delta_small * k);
+    ncc_search(prev, new, cfg, Some(full_expected), 2 * k + 8)
 }
 
 #[derive(Debug)]
@@ -135,6 +181,10 @@ pub struct Stitcher {
     footer: Option<RgbaImage>,
     last_delta: Option<u32>,
     lowconf_streak: u32,
+    /// Cached edge image of `last`'s effective region.
+    /// Invariant: only valid after the first append; sticky detection runs
+    /// before the first append so any pre-append frames need no cache handling.
+    last_eff_edges: Option<GrayImage>,
 }
 
 impl Stitcher {
@@ -147,6 +197,7 @@ impl Stitcher {
             footer: None,
             last_delta: None,
             lowconf_streak: 0,
+            last_eff_edges: None,
         }
     }
 
@@ -188,7 +239,10 @@ impl Stitcher {
             }
         }
 
-        let prev_eff = edges(&self.effective(&last));
+        let prev_eff = match self.last_eff_edges.take() {
+            Some(cached) => cached,
+            None => edges(&self.effective(&last)),
+        };
         let new_eff_rgba = self.effective(f);
         let new_eff = edges(&new_eff_rgba);
         let eff_h = prev_eff.height();
@@ -199,6 +253,8 @@ impl Stitcher {
             Some((ty, conf)) if conf >= self.cfg.min_confidence => {
                 let delta = (eff_h - t).saturating_sub(ty);
                 if delta == 0 {
+                    // No movement: restore cache so the next push doesn't recompute.
+                    self.last_eff_edges = Some(prev_eff);
                     return PushResult::SkippedDuplicate;
                 }
                 let new_rows = imageops::crop_imm(
@@ -213,6 +269,8 @@ impl Stitcher {
                 self.last = Some(f.clone());
                 self.last_delta = Some(delta);
                 self.lowconf_streak = 0;
+                // Cache the newly computed edge image for the next push.
+                self.last_eff_edges = Some(new_eff);
                 PushResult::AppendedRows(delta)
             }
             _ => {
@@ -224,8 +282,12 @@ impl Stitcher {
                     self.last = Some(f.clone());
                     self.last_delta = None;
                     self.lowconf_streak = 0;
+                    // Cache the newly computed edge image for the next push.
+                    self.last_eff_edges = Some(new_eff);
                     PushResult::HardAppended
                 } else {
+                    // Low confidence skip: restore cache so the next push doesn't recompute.
+                    self.last_eff_edges = Some(prev_eff);
                     PushResult::SkippedLowConfidence
                 }
             }
@@ -445,5 +507,22 @@ mod tests {
         let mut s = Stitcher::new(StitchConfig::default());
         s.push_frame(&f);
         assert_eq!(s.finish(), f);
+    }
+
+    #[test]
+    fn wide_retina_frames_stitch_exactly() {
+        // width 1024 -> downscale factor k=2 -> coarse+refine path
+        let src = make_source(1024, 1600, 31);
+        let view = 400;
+        let offsets = [0u32, 150, 300, 450];
+        let frames: Vec<_> = offsets.iter().map(|o| viewport(&src, *o, view)).collect();
+        let mut s = Stitcher::new(StitchConfig::default());
+        for f in &frames {
+            s.push_frame(f);
+        }
+        let out = s.finish();
+        let expected = viewport(&src, 0, 450 + view);
+        assert_eq!(out.dimensions(), expected.dimensions());
+        assert_eq!(out, expected);
     }
 }

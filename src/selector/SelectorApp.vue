@@ -17,13 +17,14 @@
       </div>
     </template>
     <div v-else class="shade full" />
-    <div class="instructions">Drag to select the scroll area — Esc to cancel</div>
+    <div class="instructions">Drag to select the area you want to scroll-capture — Esc to cancel</div>
   </div>
 
   <!-- PANEL MODE: floating control bar during capture -->
   <div v-else class="panel">
     <span class="rec-dot" />
-    <span class="panel-text">Scroll the content… {{ frames }} frames · {{ heightPx }}px</span>
+    <span class="panel-text" v-if="frames === 0">Starting capture…</span>
+    <span class="panel-text" v-else>Now scroll the content · {{ heightPx }}px captured · {{ frames }} frames</span>
     <button class="done" @click="done">Done</button>
     <button @click="cancel">Cancel</button>
   </div>
@@ -155,13 +156,13 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
 }
 .instructions {
   position: absolute;
-  top: 24px;
+  top: 72px;
   left: 50%;
   transform: translateX(-50%);
-  font: 13px -apple-system, sans-serif;
+  font: 14px -apple-system, sans-serif;
   color: #fff;
   background: rgba(0, 0, 0, 0.6);
-  padding: 6px 14px;
+  padding: 8px 18px;
   border-radius: 8px;
   pointer-events: none;
 }
