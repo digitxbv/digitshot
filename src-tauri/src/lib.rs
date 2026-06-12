@@ -1,6 +1,7 @@
 mod capture;
 mod clipboard;
 mod permissions;
+mod stitch;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
