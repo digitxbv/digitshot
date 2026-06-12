@@ -73,11 +73,56 @@
               x: selectedBlur.x, y: selectedBlur.y,
               width: selectedBlur.width, height: selectedBlur.height,
               stroke: '#0a84ff', strokeWidth: 1.5, dash: [4, 3], listening: false }" />
+
+            <!-- Crop draft: dim rects + dashed outline -->
+            <template v-if="(drafting && state.tool === 'crop' && draftRect) || pendingCrop">
+              <v-rect v-for="(dr, i) in cropDimRects" :key="i"
+                :config="{ ...dr, fill: 'rgba(0,0,0,0.45)', listening: false }" />
+              <v-rect v-if="draftRect"
+                :config="{
+                  x: draftRect.x, y: draftRect.y,
+                  width: draftRect.width, height: draftRect.height,
+                  stroke: '#ffffff', strokeWidth: 1.5, dash: [6, 4],
+                  listening: false,
+                }" />
+            </template>
           </template>
 
           <v-transformer ref="transformerRef" :config="{ rotateEnabled: false }" />
         </v-layer>
       </v-stage>
+
+      <!-- Crop confirm bar -->
+      <div v-if="pendingCrop" class="crop-confirm-bar">
+        <button @click="applyCrop">Apply Crop</button>
+        <button @click="cancelCrop">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Resize modal -->
+    <div v-if="showResize" class="modal-overlay" @mousedown.self="showResize = false">
+      <div class="modal-panel">
+        <h3>Resize Image</h3>
+        <div class="modal-field">
+          <label>Width (px)</label>
+          <input type="number" :value="resizeW" @input="onResizeWInput" min="8" />
+        </div>
+        <div class="modal-field">
+          <label>Height (px)</label>
+          <input type="number" :value="resizeH" @input="onResizeHInput" min="8" />
+        </div>
+        <div class="modal-field modal-check">
+          <label>
+            <input type="checkbox" v-model="resizeLockAspect" />
+            Lock aspect ratio
+          </label>
+        </div>
+        <p v-if="resizeError" class="modal-error">{{ resizeError }}</p>
+        <div class="modal-actions">
+          <button @click="applyResize">Apply</button>
+          <button @click="showResize = false">Cancel</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -89,8 +134,9 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEditorState, cloneSnapshot, shapeId, type EditorSnapshot, type Tool, type RectShape, type BlurShape } from "./store";
 import { History } from "./history";
-import { fitScale, normalizeRect, clampRect, type Point } from "./geometry";
+import { fitScale, normalizeRect, clampRect, aspectResize, type Point, type Rect } from "./geometry";
 import BlurPatch from "./BlurPatch.vue";
+import { flattenStage, cropCanvas, scaleCanvas } from "./flatten";
 
 const state = createEditorState();
 let history: History<EditorSnapshot> | null = null;
@@ -116,6 +162,16 @@ const historyVersion = ref(0);
 const drafting = ref(false);
 const dragStart = ref<Point | null>(null);
 const dragCurrent = ref<Point | null>(null);
+
+// Crop state
+const pendingCrop = ref<Rect | null>(null);
+
+// Resize state
+const showResize = ref(false);
+const resizeW = ref(0);
+const resizeH = ref(0);
+const resizeLockAspect = ref(true);
+const resizeError = ref("");
 
 const draftRect = computed(() =>
   dragStart.value && dragCurrent.value
@@ -156,6 +212,26 @@ const canUndo = computed(() => {
 const canRedo = computed(() => {
   void historyVersion.value;
   return history?.canRedo ?? false;
+});
+
+// Crop dim rects: four strips covering area outside the draft rect (image coords)
+const cropDimRects = computed<Array<{ x: number; y: number; width: number; height: number }>>(() => {
+  const snap = state.snapshot;
+  const dr = draftRect.value ?? pendingCrop.value;
+  if (!snap || !dr) return [];
+  const W = snap.baseWidth;
+  const H = snap.baseHeight;
+  const rects = [
+    // top
+    { x: 0, y: 0, width: W, height: dr.y },
+    // bottom
+    { x: 0, y: dr.y + dr.height, width: W, height: H - (dr.y + dr.height) },
+    // left
+    { x: 0, y: dr.y, width: dr.x, height: dr.height },
+    // right
+    { x: dr.x + dr.width, y: dr.y, width: W - (dr.x + dr.width), height: dr.height },
+  ];
+  return rects.filter((r) => r.width > 0 && r.height > 0);
 });
 
 // Used in Task 8 — keep declaration here so downstream tasks can reference it
@@ -255,6 +331,17 @@ watch(
   { flush: "post" }
 );
 
+// Clear pending crop and draft when switching away from crop tool
+watch(
+  () => state.tool,
+  (newTool, oldTool) => {
+    if (oldTool === "crop" && newTool !== "crop") {
+      pendingCrop.value = null;
+      resetDraft();
+    }
+  }
+);
+
 function resetDraft() {
   drafting.value = false;
   dragStart.value = null;
@@ -290,7 +377,13 @@ function onMouseDown(e: any) {
   }
 
   if (state.tool === "crop") {
-    // Task 9
+    const pt = pointerInImage();
+    if (!pt) return;
+    // Reset any existing pending crop before starting a new draft
+    pendingCrop.value = null;
+    dragStart.value = pt;
+    dragCurrent.value = pt;
+    drafting.value = true;
     return;
   }
 
@@ -363,14 +456,106 @@ function onMouseUp(_e: any) {
     return;
   }
 
+  if (state.tool === "crop") {
+    const snap = state.snapshot;
+    const dr = draftRect.value;
+    if (!snap || !dr) {
+      resetDraft();
+      return;
+    }
+    const clamped = clampRect(dr, snap.baseWidth, snap.baseHeight);
+    if (!clamped || clamped.width < 8 || clamped.height < 8) {
+      resetDraft();
+      pendingCrop.value = null;
+      return;
+    }
+    pendingCrop.value = clamped;
+    // Keep dragStart/dragCurrent so draftRect (and dim overlay) still renders;
+    // just stop the "active drawing" state
+    drafting.value = false;
+    return;
+  }
+
   resetDraft();
+}
+
+function cancelCrop() {
+  pendingCrop.value = null;
+  resetDraft();
+}
+
+async function applyCrop() {
+  if (!pendingCrop.value) return;
+  const stage = stageRef.value.getNode();
+  const tr = transformerRef.value.getNode();
+  const canvas = await flattenStage(stage, tr, scale.value);
+  const out = cropCanvas(canvas, pendingCrop.value);
+  pendingCrop.value = null;
+  resetDraft();
+  state.tool = "select";
+  replaceBase(out);
+}
+
+function replaceBase(canvas: HTMLCanvasElement) {
+  const dataUrl = canvas.toDataURL("image/png");
+  state.snapshot!.baseSrc = dataUrl;
+  state.snapshot!.baseWidth = canvas.width;
+  state.snapshot!.baseHeight = canvas.height;
+  state.snapshot!.shapes = []; // annotations are baked into the new base
+  state.selectedId = "";
+  commit();
+}
+
+function openResize() {
+  if (!state.snapshot) return;
+  resizeW.value = state.snapshot.baseWidth;
+  resizeH.value = state.snapshot.baseHeight;
+  resizeLockAspect.value = true;
+  resizeError.value = "";
+  showResize.value = true;
+}
+
+function onResizeWInput(e: Event) {
+  const val = parseInt((e.target as HTMLInputElement).value, 10);
+  if (isNaN(val)) return;
+  resizeW.value = val;
+  if (resizeLockAspect.value && state.snapshot) {
+    resizeH.value = aspectResize(state.snapshot.baseWidth, state.snapshot.baseHeight, { width: val }).height;
+  }
+}
+
+function onResizeHInput(e: Event) {
+  const val = parseInt((e.target as HTMLInputElement).value, 10);
+  if (isNaN(val)) return;
+  resizeH.value = val;
+  if (resizeLockAspect.value && state.snapshot) {
+    resizeW.value = aspectResize(state.snapshot.baseWidth, state.snapshot.baseHeight, { height: val }).width;
+  }
+}
+
+async function applyResize() {
+  const snap = state.snapshot;
+  if (!snap) return;
+  const origW = snap.baseWidth;
+  const origH = snap.baseHeight;
+  const w = Math.round(resizeW.value);
+  const h = Math.round(resizeH.value);
+  if (!Number.isInteger(w) || !Number.isInteger(h) || w < 8 || h < 8 || w > origW * 4 || h > origH * 4) {
+    resizeError.value = "Dimensions must be between 8px and 4× the original size.";
+    return;
+  }
+  resizeError.value = "";
+  const stage = stageRef.value.getNode();
+  const tr = transformerRef.value.getNode();
+  const canvas = await flattenStage(stage, tr, scale.value);
+  showResize.value = false;
+  replaceBase(scaleCanvas(canvas, w, h));
 }
 
 function closeWindow() {
   getCurrentWindow().close();
 }
 
-function openResize() { console.warn("not implemented"); }
 function copyResult() { console.warn("not implemented"); }
 function saveResult() { console.warn("not implemented"); }
 function saveAsResult() { console.warn("not implemented"); }
@@ -390,7 +575,9 @@ function handleKeyDown(e: KeyboardEvent) {
       commit();
     }
   } else if (e.key === "Escape") {
-    if (drafting.value) {
+    if (pendingCrop.value) {
+      cancelCrop();
+    } else if (drafting.value) {
       resetDraft();
     } else if (state.selectedId) {
       state.selectedId = "";
@@ -489,6 +676,7 @@ defineExpose({ pointerInImage, commit, state, scale });
   display: grid;
   place-items: center;
   overflow: auto;
+  position: relative;
 }
 .error {
   color: white;
@@ -502,6 +690,106 @@ defineExpose({ pointerInImage, commit, state, scale });
   padding: 4px 10px;
   font-size: 12px;
   cursor: pointer;
+}
+
+/* Crop confirm bar */
+.crop-confirm-bar {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  background: #2c2c2e;
+  border-radius: 8px;
+  padding: 8px 12px;
+  z-index: 10;
+}
+.crop-confirm-bar button {
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.crop-confirm-bar button:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Resize modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-panel {
+  background: #2c2c2e;
+  border-radius: 12px;
+  padding: 20px;
+  width: 300px;
+  color: white;
+}
+.modal-panel h3 {
+  margin: 0 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.modal-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.modal-field label {
+  color: rgba(255, 255, 255, 0.75);
+}
+.modal-field input[type="number"] {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  padding: 4px 8px;
+  width: 90px;
+  font-size: 13px;
+}
+.modal-check {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.modal-check label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.modal-error {
+  color: #ff3b30;
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.modal-actions button {
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.modal-actions button:hover {
+  background: rgba(255, 255, 255, 0.22);
 }
 </style>
 
