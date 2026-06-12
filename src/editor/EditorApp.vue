@@ -190,13 +190,14 @@ function onMouseDown(e: any) {
   if (state.tool !== "select") return;
   const target = e.target;
   const stage = stageRef.value?.getNode();
-  if (target === stage) {
-    state.selectedId = "";
+  // Transformer anchors must not change the selection
+  if (target.getParent()?.className === "Transformer") return;
+  const id = target !== stage ? target.id() : "";
+  if (id && state.snapshot?.shapes.some((s) => s.id === id)) {
+    state.selectedId = id;
   } else {
-    const id = target.id();
-    if (id && state.snapshot?.shapes.some((s) => s.id === id)) {
-      state.selectedId = id;
-    }
+    // stage, base image, or anything unselectable -> deselect
+    state.selectedId = "";
   }
 }
 
@@ -218,10 +219,10 @@ function saveResult() { console.warn("not implemented"); }
 function saveAsResult() { console.warn("not implemented"); }
 
 function handleKeyDown(e: KeyboardEvent) {
-  if (e.metaKey && !e.shiftKey && e.key === "z") {
+  if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === "z") {
     e.preventDefault();
     undo();
-  } else if (e.metaKey && e.shiftKey && e.key === "z") {
+  } else if (e.metaKey && e.shiftKey && e.key.toLowerCase() === "z") {
     e.preventDefault();
     redo();
   } else if (e.key === "Delete" || e.key === "Backspace") {
