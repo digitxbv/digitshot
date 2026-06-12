@@ -1,4 +1,4 @@
-//! Scrolling-capture session: a thread captures the selected region at ~3fps
+//! Scrolling-capture session: a thread captures the selected region continuously (paced by the capture call)
 //! via xcap and feeds the Stitcher; stop() finishes, saves, and re-enters the
 //! normal capture pipeline. One session at a time.
 
