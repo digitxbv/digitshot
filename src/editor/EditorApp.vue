@@ -32,7 +32,49 @@
           <v-image v-if="baseImageEl" :config="{ image: baseImageEl, x: 0, y: 0 }" />
         </v-layer>
         <v-layer ref="shapesLayerRef">
-          <!-- shapes rendered in Task 8 -->
+          <template v-if="baseImageEl">
+            <!-- Blur patches (below committed rects) -->
+            <BlurPatch v-for="s in blurShapes" :key="s.id" :shape="s" :image="baseImageEl" />
+
+            <!-- Live blur draft -->
+            <v-rect v-if="drafting && state.tool === 'blur' && draftRect"
+              :config="{
+                x: draftRect.x, y: draftRect.y,
+                width: draftRect.width, height: draftRect.height,
+                fill: 'rgba(120,120,128,0.35)',
+                listening: false,
+              }" />
+
+            <!-- Committed rects -->
+            <v-rect v-for="s in rectShapes" :key="s.id"
+              :config="{
+                id: s.id,
+                x: s.x, y: s.y,
+                width: s.width, height: s.height,
+                stroke: s.stroke, strokeWidth: s.strokeWidth,
+                draggable: state.tool === 'select',
+                strokeScaleEnabled: true,
+              }"
+              @dragend="onShapeDragEnd(s, $event)"
+              @transformend="onShapeTransformEnd(s, $event)" />
+
+            <!-- Live rect draft -->
+            <v-rect v-if="drafting && state.tool === 'rect' && draftRect"
+              :config="{
+                x: draftRect.x, y: draftRect.y,
+                width: draftRect.width, height: draftRect.height,
+                stroke: state.stroke, strokeWidth: state.strokeWidth,
+                dash: [6, 4],
+                listening: false,
+              }" />
+
+            <!-- Blur selection outline (above everything except transformer) -->
+            <v-rect v-if="selectedBlur" :config="{
+              x: selectedBlur.x, y: selectedBlur.y,
+              width: selectedBlur.width, height: selectedBlur.height,
+              stroke: '#0a84ff', strokeWidth: 1.5, dash: [4, 3], listening: false }" />
+          </template>
+
           <v-transformer ref="transformerRef" :config="{ rotateEnabled: false }" />
         </v-layer>
       </v-stage>
@@ -45,9 +87,10 @@ import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createEditorState, cloneSnapshot, type EditorSnapshot, type Tool } from "./store";
+import { createEditorState, cloneSnapshot, shapeId, type EditorSnapshot, type Tool, type RectShape, type BlurShape } from "./store";
 import { History } from "./history";
-import { fitScale, type Point } from "./geometry";
+import { fitScale, normalizeRect, clampRect, type Point } from "./geometry";
+import BlurPatch from "./BlurPatch.vue";
 
 const state = createEditorState();
 let history: History<EditorSnapshot> | null = null;
@@ -68,6 +111,31 @@ const stageRef = ref<any>();
 const shapesLayerRef = ref<any>();
 const transformerRef = ref<any>();
 const historyVersion = ref(0);
+
+// Drafting state
+const drafting = ref(false);
+const dragStart = ref<Point | null>(null);
+const dragCurrent = ref<Point | null>(null);
+
+const draftRect = computed(() =>
+  dragStart.value && dragCurrent.value
+    ? normalizeRect(dragStart.value, dragCurrent.value)
+    : null
+);
+
+const rectShapes = computed<RectShape[]>(() =>
+  (state.snapshot?.shapes ?? []).filter((s): s is RectShape => s.kind === "rect")
+);
+
+const blurShapes = computed<BlurShape[]>(() =>
+  (state.snapshot?.shapes ?? []).filter((s): s is BlurShape => s.kind === "blur")
+);
+
+const selectedBlur = computed<BlurShape | null>(() => {
+  if (!state.selectedId) return null;
+  const shape = state.snapshot?.shapes.find((s) => s.id === state.selectedId);
+  return shape?.kind === "blur" ? shape : null;
+});
 
 const stageConfig = computed(() => {
   const snap = state.snapshot;
@@ -91,7 +159,6 @@ const canRedo = computed(() => {
 });
 
 // Used in Task 8 — keep declaration here so downstream tasks can reference it
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function pointerInImage(): Point | null {
   const stage = stageRef.value?.getNode();
   const pos = stage?.getPointerPosition();
@@ -186,7 +253,46 @@ watch(
   }
 );
 
+function resetDraft() {
+  drafting.value = false;
+  dragStart.value = null;
+  dragCurrent.value = null;
+}
+
+function onShapeDragEnd(s: RectShape, e: any) {
+  s.x = e.target.x();
+  s.y = e.target.y();
+  commit();
+}
+
+function onShapeTransformEnd(s: RectShape, e: any) {
+  const node = e.target;
+  s.x = node.x();
+  s.y = node.y();
+  s.width = Math.max(4, node.width() * node.scaleX());
+  s.height = Math.max(4, node.height() * node.scaleY());
+  node.scaleX(1);
+  node.scaleY(1);
+  commit();
+}
+
 function onMouseDown(e: any) {
+  // Drawing tools — handle before select logic
+  if (state.tool === "rect" || state.tool === "blur") {
+    const pt = pointerInImage();
+    if (!pt) return;
+    dragStart.value = pt;
+    dragCurrent.value = pt;
+    drafting.value = true;
+    return;
+  }
+
+  if (state.tool === "crop") {
+    // Task 9
+    return;
+  }
+
+  // Select tool logic
   if (state.tool !== "select") return;
   const target = e.target;
   const stage = stageRef.value?.getNode();
@@ -202,11 +308,60 @@ function onMouseDown(e: any) {
 }
 
 function onMouseMove(_e: any) {
-  // Task 8 fills this
+  if (drafting.value) {
+    const pt = pointerInImage();
+    if (pt) dragCurrent.value = pt;
+  }
 }
 
 function onMouseUp(_e: any) {
-  // Task 8 fills this
+  if (!drafting.value) return;
+
+  if (state.tool === "rect") {
+    const dr = draftRect.value;
+    if (!dr || dr.width < 4 || dr.height < 4) {
+      resetDraft();
+      return;
+    }
+    const id = shapeId();
+    state.snapshot!.shapes.push({
+      kind: "rect",
+      id,
+      ...dr,
+      stroke: state.stroke,
+      strokeWidth: state.strokeWidth,
+    });
+    commit();
+    state.tool = "select";
+    state.selectedId = id;
+    resetDraft();
+    return;
+  }
+
+  if (state.tool === "blur") {
+    const dr = draftRect.value;
+    if (!dr) {
+      resetDraft();
+      return;
+    }
+    const clamped = clampRect(dr, state.snapshot!.baseWidth, state.snapshot!.baseHeight);
+    if (!clamped || clamped.width < 4 || clamped.height < 4) {
+      resetDraft();
+      return;
+    }
+    state.snapshot!.shapes.push({
+      kind: "blur",
+      id: shapeId(),
+      ...clamped,
+      pixelSize: Math.max(8, Math.round(Math.min(clamped.width, clamped.height) / 12)),
+    });
+    commit();
+    state.tool = "select";
+    resetDraft();
+    return;
+  }
+
+  resetDraft();
 }
 
 function closeWindow() {
@@ -233,7 +388,9 @@ function handleKeyDown(e: KeyboardEvent) {
       commit();
     }
   } else if (e.key === "Escape") {
-    if (state.selectedId) {
+    if (drafting.value) {
+      resetDraft();
+    } else if (state.selectedId) {
       state.selectedId = "";
     } else {
       closeWindow();
