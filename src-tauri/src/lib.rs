@@ -253,6 +253,13 @@ fn hide_frame(app: &AppHandle) {
 
 /// Entry point for tray/hotkey/selector. Gates on the Screen Recording grant.
 fn begin_scroll_capture(app: &AppHandle) {
+    // A session is already running: ignore re-triggers instead of overlaying
+    // the fullscreen selector on top of an active capture.
+    if let Some(state) = app.try_state::<scrolling::ScrollState>() {
+        if state.0.lock().unwrap().is_some() {
+            return;
+        }
+    }
     if !permissions::has_screen_recording() {
         permissions::request_screen_recording(); // triggers the system dialog once
         use tauri_plugin_dialog::DialogExt;
@@ -329,7 +336,14 @@ fn scroll_capture_stop(
     let session = state.0.lock().unwrap().take().ok_or("no session")?;
     hide_selector(&app);
     hide_frame(&app);
-    if let Some(stitched) = scrolling::stop(session) {
+    let stitched = match scrolling::stop(session) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = app.emit("scroll-capture-error", e.clone());
+            return Err(e);
+        }
+    };
+    if let Some(stitched) = stitched {
         let dir = capture::captures_dir(&home_dir());
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join(capture::capture_filename(&chrono::Local::now()));
@@ -367,12 +381,26 @@ fn position_scroll_panel(app: AppHandle, region: scrolling::Region) -> Result<()
     let mon_w = monitor.size().width as f64 / scale;
     const PANEL_W: f64 = 440.0;
     const PANEL_H: f64 = 64.0;
-    let mut y = (region.y + region.height) as f64 + 12.0;
-    if y + PANEL_H > mon_h {
-        y = (region.y as f64 - PANEL_H - 12.0).max(8.0);
-    }
-    let x = ((region.x as f64) + (region.width as f64) / 2.0 - PANEL_W / 2.0)
-        .clamp(8.0, mon_w - PANEL_W - 8.0);
+    let rx = region.x as f64;
+    let ry = region.y as f64;
+    let rw = region.width as f64;
+    let rh = region.height as f64;
+    const GAP: f64 = 12.0;
+    // Preferred placements, in order: below, above, right side, left side.
+    // Each must fit on the monitor; sides use the region's vertical middle.
+    let (x, y) = if ry + rh + GAP + PANEL_H <= mon_h {
+        ((rx + rw / 2.0 - PANEL_W / 2.0).clamp(8.0, mon_w - PANEL_W - 8.0), ry + rh + GAP)
+    } else if ry - GAP - PANEL_H >= 0.0 {
+        ((rx + rw / 2.0 - PANEL_W / 2.0).clamp(8.0, mon_w - PANEL_W - 8.0), ry - GAP - PANEL_H)
+    } else if rx + rw + GAP + PANEL_W <= mon_w {
+        (rx + rw + GAP, (ry + rh / 2.0 - PANEL_H / 2.0).clamp(8.0, mon_h - PANEL_H - 8.0))
+    } else if rx - GAP - PANEL_W >= 0.0 {
+        (rx - GAP - PANEL_W, (ry + rh / 2.0 - PANEL_H / 2.0).clamp(8.0, mon_h - PANEL_H - 8.0))
+    } else {
+        // Region covers essentially the whole screen; top-center overlap is the
+        // least-bad option (better than blocking the content being scrolled).
+        ((mon_w / 2.0 - PANEL_W / 2.0).max(8.0), 8.0)
+    };
     win.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H)).map_err(|e| e.to_string())?;
     win.set_position(tauri::LogicalPosition::new(x, y)).map_err(|e| e.to_string())?;
     Ok(())

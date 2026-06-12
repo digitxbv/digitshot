@@ -38,10 +38,10 @@
     </span>
     <span class="panel-text" v-else-if="frames === 0">Starting capture…</span>
     <span class="panel-text" v-else>
-      Border is green: everything you scroll past is captured · {{ heightPx }}px
+      Border is green: everything you scroll past is captured · {{ Math.round(heightPx / dpr) }}px
     </span>
-    <button class="done" @click="done">Done</button>
-    <button @click="cancel">Cancel</button>
+    <button class="done" @click="done" :disabled="stopping">Done</button>
+    <button @click="cancel" :disabled="stopping">Cancel</button>
   </div>
 </template>
 
@@ -58,6 +58,8 @@ const rect = ref<Rect | null>(null);
 const frames = ref(0);
 const heightPx = ref(0);
 const lost = ref(false);
+const stopping = ref(false);
+const dpr = window.devicePixelRatio || 1;
 
 let dragging = false;
 let startX = 0;
@@ -108,8 +110,13 @@ async function startCapture() {
   // Shrink the veil into the panel BEFORE starting capture so the veil is
   // never baked into the first frames.
   mode.value = "panel";
-  await invoke("position_scroll_panel", { region });
-  await invoke("scroll_capture_start", { region });
+  try {
+    await invoke("position_scroll_panel", { region });
+    await invoke("scroll_capture_start", { region });
+  } catch (e) {
+    // failed to start: never leave the panel UI without a session behind it
+    cancelAll();
+  }
 }
 
 function resetToSelect() {
@@ -123,11 +130,15 @@ function cancelAll() {
 }
 
 function done() {
-  invoke("scroll_capture_stop");
+  if (stopping.value) return;
+  stopping.value = true;
+  invoke("scroll_capture_stop").finally(() => { stopping.value = false; });
 }
 
 function cancel() {
-  invoke("scroll_capture_cancel");
+  if (stopping.value) return;
+  stopping.value = true;
+  invoke("scroll_capture_cancel").finally(() => { stopping.value = false; });
 }
 
 function onKey(e: KeyboardEvent) {
@@ -145,6 +156,7 @@ function reset() {
   frames.value = 0;
   heightPx.value = 0;
   lost.value = false;
+  stopping.value = false;
 }
 
 const confirmBarStyle = computed(() => {
@@ -300,6 +312,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
   background: #30d158;
   color: #1c1c1e;
   font-weight: 600;
+}
+.panel button:disabled {
+  opacity: 0.5;
 }
 </style>
 

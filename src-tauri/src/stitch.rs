@@ -1,12 +1,12 @@
 //! Pure frame-stitching engine for scrolling capture. Operates entirely in
 //! physical pixels on `RgbaImage` frames of identical dimensions. No I/O.
 
-use image::{imageops, DynamicImage, GrayImage, RgbaImage};
+use image::{imageops, GrayImage, RgbaImage};
 
 /// Grayscale -> Sobel gradient magnitude, clamped to u8. Matching in the
 /// edge domain makes NCC robust on low-contrast (mostly white) pages.
 pub(crate) fn edges(rgba: &RgbaImage) -> GrayImage {
-    let gray = DynamicImage::ImageRgba8(rgba.clone()).into_luma8();
+    let gray = image::imageops::grayscale(rgba);
     let grad = imageproc::gradients::sobel_gradients(&gray);
     GrayImage::from_fn(grad.width(), grad.height(), |x, y| {
         image::Luma([(grad.get_pixel(x, y).0[0] >> 2).min(255) as u8])
@@ -179,11 +179,15 @@ pub(crate) fn find_overlap(
     // spurious matches) when the actual scroll step changes dramatically;
     // the full-range search finds the globally best match.
     if expected_ty.is_some() {
-        let full = find_overlap_inner(prev, new, cfg, None);
         let windowed_conf = windowed.map(|(_, c)| c).unwrap_or(0.0);
-        let full_conf = full.map(|(_, c)| c).unwrap_or(0.0);
-        if full_conf > windowed_conf {
-            return full;
+        // A near-perfect windowed match cannot be beaten meaningfully; skip the
+        // expensive cross-check. False positives observed in practice score low.
+        if windowed_conf < 0.85 {
+            let full = find_overlap_inner(prev, new, cfg, None);
+            let full_conf = full.map(|(_, c)| c).unwrap_or(0.0);
+            if full_conf > windowed_conf {
+                return full;
+            }
         }
     }
 
@@ -261,6 +265,12 @@ impl Stitcher {
             self.last = Some(f.clone());
             return PushResult::First;
         };
+
+        // Display reconfiguration mid-session can change frame dimensions; mixing
+        // sizes would panic in row indexing / vstack. Skip such frames safely.
+        if f.dimensions() != last.dimensions() {
+            return PushResult::SkippedLowConfidence;
+        }
 
         if frames_nearly_equal(f, &last) {
             return PushResult::SkippedDuplicate;
@@ -681,6 +691,16 @@ mod tests {
         }
         let out = s.finish();
         assert_eq!(out, viewport(&src, 0, 820 + view));
+    }
+
+    #[test]
+    fn dimension_change_is_skipped_not_panicking() {
+        let src = make_source(300, 600, 67);
+        let mut s = Stitcher::new(StitchConfig::default());
+        s.push_frame(&viewport(&src, 0, 300));
+        let other = make_source(200, 150, 68);
+        assert!(matches!(s.push_frame(&other), PushResult::SkippedLowConfidence));
+        assert_eq!(s.finish().dimensions(), (300, 300));
     }
 
     #[test]

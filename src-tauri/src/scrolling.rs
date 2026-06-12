@@ -133,13 +133,17 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
 }
 
 /// Stops the loop and returns the stitched image (None if no frame was captured).
-pub fn stop(session: Session) -> Option<image::RgbaImage> {
+/// Returns Err if the capture thread panicked.
+pub fn stop(session: Session) -> Result<Option<image::RgbaImage>, String> {
     session.stop.store(true, Ordering::Relaxed);
-    let stitcher = session.handle.join().ok()?;
+    let stitcher = session
+        .handle
+        .join()
+        .map_err(|_| "capture thread crashed".to_string())?;
     if stitcher.height() == 0 {
-        return None;
+        return Ok(None);
     }
-    Some(stitcher.finish())
+    Ok(Some(stitcher.finish()))
 }
 
 pub fn cancel(session: Session) {
