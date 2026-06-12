@@ -29,3 +29,4 @@ arboard = { version = "3", features = ["image-data"] }
 image = "0.25"
 base64 = "0.22"
 urlencoding = "2"
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }

@@ -6,6 +6,22 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{
+    CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
+};
+
+#[cfg(target_os = "macos")]
+tauri_nspanel::tauri_panel! {
+    OverlayPanel {
+        config: {
+            can_become_key_window: false,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct CapturePayload {
     path: String,
@@ -90,9 +106,61 @@ fn open_editor(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
+const OVERLAY_MARGIN: i32 = 16;
+
+/// Resize the overlay to fit its content and pin it bottom-left of the
+/// primary monitor's work area.
+#[tauri::command]
+fn resize_overlay(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let win = app.get_webview_window("overlay").ok_or("no overlay window")?;
+    let monitor = win
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("no primary monitor")?;
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let phys_w = (width * scale) as u32;
+    let phys_h = (height * scale) as u32;
+    let margin = (OVERLAY_MARGIN as f64 * scale) as i32;
+    let x = work.position.x + margin;
+    let y = work.position.y + work.size.height as i32 - phys_h as i32 - margin;
+    win.set_size(tauri::PhysicalSize::new(phys_w, phys_h)).map_err(|e| e.to_string())?;
+    win.set_position(tauri::PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn show_overlay(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let panel = app.get_webview_panel("overlay").map_err(|e| format!("{e:?}"))?;
+        panel.show(); // orderFrontRegardless — never steals focus
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(w) = app.get_webview_window("overlay") { let _ = w.show(); }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_overlay(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let panel = app.get_webview_panel("overlay").map_err(|e| format!("{e:?}"))?;
+        panel.hide();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(w) = app.get_webview_window("overlay") { let _ = w.hide(); }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -102,6 +170,9 @@ pub fn run() {
             save_png,
             reveal_in_finder,
             open_editor,
+            resize_overlay,
+            show_overlay,
+            hide_overlay,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -148,6 +219,22 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // NSPanel overlay setup
+            #[cfg(target_os = "macos")]
+            {
+                let window = app.get_webview_window("overlay").unwrap();
+                let panel = window.to_panel::<OverlayPanel>().unwrap();
+                panel.set_level(PanelLevel::Status.value());
+                panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+                panel.set_collection_behavior(
+                    CollectionBehavior::new()
+                        .can_join_all_spaces()
+                        .full_screen_auxiliary()
+                        .value(),
+                );
+                panel.set_hides_on_deactivate(false);
+            }
 
             Ok(())
         })
