@@ -16,10 +16,11 @@
       <button :disabled="!canUndo" @click="undo">Undo</button>
       <button :disabled="!canRedo" @click="redo">Redo</button>
       <span class="spacer" />
-      <button @click="openResize">Resize…</button>
-      <button @click="copyResult">Copy</button>
-      <button @click="saveResult">Save</button>
-      <button @click="saveAsResult">Save As…</button>
+      <button :disabled="!state.snapshot" @click="openResize">Resize…</button>
+      <button :disabled="!state.snapshot" @click="copyResult">Copy</button>
+      <button :disabled="!state.snapshot" @click="saveResult">Save</button>
+      <button :disabled="!state.snapshot" @click="saveAsResult">Save As…</button>
+      <span v-if="flashMsg" class="flash" :style="{ color: flashMsg.startsWith('Failed') ? '#ff453a' : '#30d158' }">{{ flashMsg }}</span>
     </div>
     <div ref="viewport" class="viewport">
       <div v-if="state.error" class="error">
@@ -129,7 +130,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createEditorState, cloneSnapshot, shapeId, type EditorSnapshot, type Tool, type RectShape, type BlurShape } from "./store";
@@ -569,9 +571,51 @@ function closeWindow() {
   getCurrentWindow().close();
 }
 
-function copyResult() { console.warn("not implemented"); }
-function saveResult() { console.warn("not implemented"); }
-function saveAsResult() { console.warn("not implemented"); }
+// Flash toast
+const flashMsg = ref("");
+let flashTimer: ReturnType<typeof setTimeout> | null = null;
+function flash(msg: string) {
+  if (flashTimer !== null) clearTimeout(flashTimer);
+  flashMsg.value = msg;
+  flashTimer = setTimeout(() => { flashMsg.value = ""; flashTimer = null; }, 1500);
+}
+
+async function exportPngBase64(): Promise<string> {
+  const canvas = await exportFlatten();
+  return canvas.toDataURL("image/png").split(",")[1];
+}
+
+async function copyResult() {
+  try {
+    await invoke("copy_image_data", { base64Png: await exportPngBase64() });
+    flash("Copied");
+  } catch (e) {
+    flash("Failed: " + String(e));
+  }
+}
+
+async function saveResult() {
+  try {
+    await invoke("save_png", { path: state.filePath, base64Png: await exportPngBase64() });
+    flash("Saved");
+  } catch (e) {
+    flash("Failed: " + String(e));
+  }
+}
+
+async function saveAsResult() {
+  try {
+    const target = await save({
+      defaultPath: state.filePath.replace(/\.png$/, " edited.png"),
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (!target) return;
+    await invoke("save_png", { path: target, base64Png: await exportPngBase64() });
+    flash("Saved");
+  } catch (e) {
+    flash("Failed: " + String(e));
+  }
+}
 
 function handleKeyDown(e: KeyboardEvent) {
   if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === "z") {
@@ -682,6 +726,9 @@ defineExpose({ pointerInImage, commit, state, scale });
 }
 .spacer {
   flex: 1;
+}
+.flash {
+  font-size: 12px;
 }
 .viewport {
   flex: 1;
