@@ -1,5 +1,6 @@
 mod capture;
 mod clipboard;
+mod permissions;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
@@ -13,13 +14,20 @@ use tauri_nspanel::{
 
 #[cfg(target_os = "macos")]
 tauri_nspanel::tauri_panel! {
-    OverlayPanel {
+    panel!(OverlayPanel {
         config: {
             can_become_key_window: false,
             can_become_main_window: false,
             is_floating_panel: true
         }
-    }
+    })
+    panel!(SelectorPanel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
 }
 
 #[derive(Clone, Serialize)]
@@ -246,6 +254,22 @@ pub fn run() {
                 let window = app.get_webview_window("overlay").unwrap();
                 let panel = window.to_panel::<OverlayPanel>().unwrap();
                 panel.set_level(PanelLevel::Status.value());
+                panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+                panel.set_collection_behavior(
+                    CollectionBehavior::new()
+                        .can_join_all_spaces()
+                        .full_screen_auxiliary()
+                        .value(),
+                );
+                panel.set_hides_on_deactivate(false);
+            }
+
+            // NSPanel selector setup
+            #[cfg(target_os = "macos")]
+            {
+                let window = app.get_webview_window("selector").unwrap();
+                let panel = window.to_panel::<SelectorPanel>().unwrap();
+                panel.set_level(PanelLevel::ScreenSaver.value());
                 panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
                 panel.set_collection_behavior(
                     CollectionBehavior::new()
