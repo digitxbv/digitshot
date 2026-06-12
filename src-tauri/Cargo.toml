@@ -33,5 +33,8 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.
 xcap = "0.9"
 imageproc = "0.27"
 
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 2

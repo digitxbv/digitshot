@@ -194,8 +194,15 @@ fn filter_existing(paths: Vec<String>) -> Vec<String> {
 /// Cover the primary monitor with the click-through frame window, tell its
 /// page where the region is, and show it without focus.
 fn show_frame(app: &AppHandle, region: &scrolling::Region) {
-    if let Some(win) = app.get_webview_window("frame") {
-        if let Ok(Some(monitor)) = win.primary_monitor() {
+    let win = match app.get_webview_window("frame") {
+        Some(w) => w,
+        None => {
+            eprintln!("[frame] no 'frame' window!");
+            return;
+        }
+    };
+    match win.primary_monitor() {
+        Ok(Some(monitor)) => {
             let scale = monitor.scale_factor();
             let _ = win.set_size(tauri::LogicalSize::new(
                 monitor.size().width as f64 / scale,
@@ -203,13 +210,27 @@ fn show_frame(app: &AppHandle, region: &scrolling::Region) {
             ));
             let _ = win.set_position(tauri::LogicalPosition::new(0.0, 0.0));
         }
-        let _ = win.set_ignore_cursor_events(true); // clicks pass through to the app below
-        let _ = win.emit("scroll-region", region.clone());
-        #[cfg(target_os = "macos")]
-        {
-            use tauri_nspanel::ManagerExt;
-            if let Ok(panel) = app.get_webview_panel("frame") {
+        _ => {
+            eprintln!("[frame] no primary monitor");
+        }
+    }
+    let _ = win.set_ignore_cursor_events(true); // clicks pass through to the app below
+    let _ = win.emit("scroll-region", region.clone());
+    eprintln!("[frame] region emitted: {:?}", region);
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt;
+        match app.get_webview_panel("frame") {
+            Ok(panel) => {
                 panel.show();
+                eprintln!("[frame] panel shown");
+            }
+            Err(e) => {
+                eprintln!("[frame] get_webview_panel failed: {e:?}");
+                if let Some(w) = app.get_webview_window("frame") {
+                    let _ = w.show();
+                    eprintln!("[frame] fell back to window.show()");
+                }
             }
         }
     }
@@ -219,8 +240,9 @@ fn hide_frame(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
         use tauri_nspanel::ManagerExt;
-        if let Ok(panel) = app.get_webview_panel("frame") {
-            panel.hide();
+        match app.get_webview_panel("frame") {
+            Ok(panel) => panel.hide(),
+            Err(e) => eprintln!("[frame] hide: get_webview_panel failed: {e:?}"),
         }
     }
     #[cfg(not(target_os = "macos"))]

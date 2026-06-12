@@ -84,9 +84,17 @@ pub fn start(app: AppHandle, region: Region) -> Result<Session, String> {
                     break;
                 }
             };
+            let t0 = std::time::Instant::now();
             match monitor.capture_region(region.x, region.y, region.width, region.height) {
                 Ok(frame) => {
+                    let capture_ms = t0.elapsed().as_millis();
+                    let t1 = std::time::Instant::now();
                     let result = stitcher.push_frame(&frame);
+                    let push_ms = t1.elapsed().as_millis();
+                    eprintln!(
+                        "[scroll] frame={} capture={}ms push={}ms result={:?} canvas_h={}",
+                        frames, capture_ms, push_ms, result, stitcher.height()
+                    );
                     match result {
                         PushResult::SkippedLowConfidence => {
                             lowconf_run += 1;
