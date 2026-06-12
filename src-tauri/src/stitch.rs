@@ -181,10 +181,14 @@ pub struct Stitcher {
     footer: Option<RgbaImage>,
     last_delta: Option<u32>,
     lowconf_streak: u32,
-    /// Cached edge image of `last`'s effective region.
+    /// Cached edge image of `last`'s effective region (full-width).
     /// Invariant: only valid after the first append; sticky detection runs
     /// before the first append so any pre-append frames need no cache handling.
     last_eff_edges: Option<GrayImage>,
+    /// Horizontal span of columns that change between frames (scrolling content).
+    /// Detected once from the first non-duplicate pair alongside sticky detection.
+    /// None means use the full width.
+    active_cols: Option<(u32, u32)>,
 }
 
 impl Stitcher {
@@ -198,6 +202,7 @@ impl Stitcher {
             last_delta: None,
             lowconf_streak: 0,
             last_eff_edges: None,
+            active_cols: None,
         }
     }
 
@@ -211,6 +216,17 @@ impl Stitcher {
         imageops::crop_imm(f, 0, top, f.width(), f.height() - top - bottom).to_image()
     }
 
+    /// Crop an edge image to the active column span for matching.
+    /// Full-width edges are stored in the cache; cropping happens at call time.
+    fn match_region<'a>(&self, img: &'a GrayImage) -> std::borrow::Cow<'a, GrayImage> {
+        match self.active_cols {
+            Some((x, w)) => std::borrow::Cow::Owned(
+                imageops::crop_imm(img, x, 0, w, img.height()).to_image(),
+            ),
+            None => std::borrow::Cow::Borrowed(img),
+        }
+    }
+
     pub fn push_frame(&mut self, f: &RgbaImage) -> PushResult {
         let Some(last) = self.last.clone() else {
             self.canvas = Some(f.clone());
@@ -222,11 +238,12 @@ impl Stitcher {
             return PushResult::SkippedDuplicate;
         }
 
-        // First scrolled pair: detect sticky edges and retroactively trim
-        // the footer off the canvas (it re-attaches once at finish()).
+        // First scrolled pair: detect sticky edges and active columns, then
+        // retroactively trim the footer off the canvas (re-attaches at finish()).
         if self.sticky.is_none() {
             let (top, bottom) = detect_sticky(&last, f);
             self.sticky = Some((top, bottom));
+            self.active_cols = detect_active_columns(&last, f);
             if bottom > 0 {
                 let canvas = self.canvas.take().unwrap();
                 let h = canvas.height();
@@ -249,7 +266,7 @@ impl Stitcher {
         let t = template_height(eff_h, &self.cfg);
         let expected_ty = self.last_delta.map(|d| (eff_h - t).saturating_sub(d));
 
-        match find_overlap(&prev_eff, &new_eff, &self.cfg, expected_ty) {
+        match find_overlap(&self.match_region(&prev_eff), &self.match_region(&new_eff), &self.cfg, expected_ty) {
             Some((ty, conf)) if conf >= self.cfg.min_confidence => {
                 let delta = (eff_h - t).saturating_sub(ty);
                 if delta == 0 {
@@ -301,6 +318,62 @@ impl Stitcher {
             None => canvas,
         }
     }
+}
+
+/// Columns that changed between two frames (the scrolling content span).
+///
+/// Samples columns with step 4 and rows with step 4. A pixel differs when
+/// any channel diff > 10. A column is "changed" when > 2% of sampled pixels
+/// differ. Returns the contiguous span (x_start, width) from the first to the
+/// last changed column, snapped to 4-pixel boundaries. Returns None when the
+/// span is fewer than 64 columns wide (too narrow to be useful) or when ALL
+/// columns changed (no static region → no restriction needed).
+pub(crate) fn detect_active_columns(a: &RgbaImage, b: &RgbaImage) -> Option<(u32, u32)> {
+    let (w, h) = a.dimensions();
+    let sampled_rows: Vec<u32> = (0..h).step_by(4).collect();
+    let n_rows = sampled_rows.len() as f32;
+
+    // For each sampled column, count differing pixels.
+    let col_changed: Vec<bool> = (0..w)
+        .step_by(4)
+        .map(|x| {
+            let diffs = sampled_rows
+                .iter()
+                .filter(|&&y| {
+                    let pa = a.get_pixel(x, y).0;
+                    let pb = b.get_pixel(x, y).0;
+                    (0..3).any(|c| (pa[c] as i32 - pb[c] as i32).abs() > 10)
+                })
+                .count();
+            (diffs as f32 / n_rows) > 0.02
+        })
+        .collect();
+
+    let n_changed = col_changed.iter().filter(|&&c| c).count();
+    // All columns changed → full-width scroll, no restriction needed.
+    if n_changed == col_changed.len() {
+        return None;
+    }
+
+    // Find first and last changed sampled-column index.
+    let first_idx = col_changed.iter().position(|&c| c)?;
+    let last_idx = col_changed.iter().rposition(|&c| c)?;
+
+    // Convert indices back to pixel coordinates (step 4).
+    let x_start_raw = (first_idx as u32) * 4;
+    let x_end_raw = (last_idx as u32) * 4;
+
+    // Snap x_start down to multiple of 4, extend end up accordingly, clamp.
+    let x_start = x_start_raw & !3;
+    let x_end = ((x_end_raw + 3) & !3).min(w.saturating_sub(1));
+    let width = x_end.saturating_sub(x_start) + 1;
+    let width = width.min(w.saturating_sub(x_start));
+
+    if width < 64 {
+        return None;
+    }
+
+    Some((x_start, width))
 }
 
 /// Rows identical between two frames that OTHERWISE differ are fixed UI
@@ -524,5 +597,62 @@ mod tests {
         let expected = viewport(&src, 0, 450 + view);
         assert_eq!(out.dimensions(), expected.dimensions());
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn detect_active_columns_finds_scrolling_span() {
+        let content = make_source(300, 900, 41);
+        let sidebar = make_source(200, 300, 43); // static left pane
+        let frame = |off: u32| {
+            let body = viewport(&content, off, 300);
+            // hstack: sidebar (static) | body (scrolls)
+            let mut f = RgbaImage::new(500, 300);
+            image::imageops::replace(&mut f, &sidebar, 0, 0);
+            image::imageops::replace(&mut f, &body, 200, 0);
+            f
+        };
+        let (a, b) = (frame(0), frame(120));
+        let span = detect_active_columns(&a, &b).expect("span");
+        // span must start at/near the body boundary and cover the body
+        assert!(span.0 >= 196 && span.0 <= 204, "x_start = {}", span.0);
+        assert!(span.0 + span.1 >= 496, "span end = {}", span.0 + span.1);
+    }
+
+    #[test]
+    fn detect_active_columns_none_when_everything_scrolls() {
+        let src = make_source(300, 900, 47);
+        let a = viewport(&src, 0, 300);
+        let b = viewport(&src, 120, 300);
+        assert!(detect_active_columns(&a, &b).is_none());
+    }
+
+    #[test]
+    fn static_sidebar_does_not_poison_scroll_matching() {
+        let content = make_source(400, 1200, 53);
+        let sidebar = make_source(300, 300, 59);
+        let frame = |off: u32| {
+            let body = viewport(&content, off, 300);
+            let mut f = RgbaImage::new(700, 300);
+            image::imageops::replace(&mut f, &sidebar, 0, 0);
+            image::imageops::replace(&mut f, &body, 300, 0);
+            f
+        };
+        let offsets = [0u32, 110, 220, 330];
+        let mut s = Stitcher::new(StitchConfig::default());
+        let results: Vec<_> = offsets.iter().map(|o| s.push_frame(&frame(*o))).collect();
+        assert!(matches!(results[0], PushResult::First));
+        // Every scrolled frame must be APPENDED with the TRUE delta — the
+        // static sidebar must not cause SkippedDuplicate or wrong deltas.
+        for (i, r) in results[1..].iter().enumerate() {
+            match r {
+                PushResult::AppendedRows(d) => assert_eq!(*d, 110, "frame {} delta", i + 1),
+                other => panic!("frame {} got {:?}", i + 1, other),
+            }
+        }
+        let out = s.finish();
+        // Right side of the output must equal the scrolled content exactly.
+        let out_body = image::imageops::crop_imm(&out, 300, 0, 400, out.height()).to_image();
+        let expected_body = viewport(&content, 0, 330 + 300);
+        assert_eq!(out_body, expected_body);
     }
 }

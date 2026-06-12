@@ -17,7 +17,7 @@
       </div>
     </template>
     <div v-else class="shade full" />
-    <div class="instructions">Drag to select the area you want to scroll-capture — Esc to cancel</div>
+    <div class="instructions">Drag to select ONLY the area that scrolls (avoid sidebars) — Esc to cancel</div>
   </div>
 
   <!-- PANEL MODE: floating control bar during capture -->
