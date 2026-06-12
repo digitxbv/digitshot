@@ -107,3 +107,7 @@ cd src-tauri && cargo test
 ```bash
 npm run tauri build
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
